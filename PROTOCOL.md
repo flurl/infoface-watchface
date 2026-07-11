@@ -46,6 +46,11 @@ UI entirely. The PKJS bridge preserves it with zero C-code changes.
 
 ## Local HTTP API (companion app → PebbleKit JS)
 
+The URL PKJS fetches is user-configurable (see `ServerUrl` under "Watch settings" below) and
+not required to point at the companion app at all — anything serving the JSON shape below
+works, e.g. a self-hosted web service returning something other than calendar items. The
+companion app is just the **default** source:
+
 - **Server:** `CalendarSyncService`, a foreground service in the companion app. Binds to
   `127.0.0.1:47225` only (not reachable off-device). Started automatically on app launch
   (after the `READ_CALENDAR` permission is granted); stoppable via the app's UI.
@@ -62,12 +67,14 @@ UI entirely. The PKJS bridge preserves it with zero C-code changes.
 ## PebbleKit JS (watchface → watch)
 
 `src/pkjs/index.js`: on the `ready` event, and then every 15 minutes
-(`REFRESH_INTERVAL_MS`), fetches `/items` via `XMLHttpRequest` and relays via
-`Pebble.sendAppMessage()` using the **same message-key names** as the C side (PKJS resolves
-names to the build's numeric IDs automatically — no manual mapping needed, unlike the old
-Kotlin-side integration). On any XHR failure (companion app not running, service stopped,
-etc.), the fetch is skipped and the watch keeps showing whatever it last had — no explicit
-"clear" on failure.
+(`REFRESH_INTERVAL_MS`), fetches the configured URL (`getServerUrl()`, see below) via
+`XMLHttpRequest` and relays via `Pebble.sendAppMessage()` using the **same message-key
+names** as the C side (PKJS resolves names to the build's numeric IDs automatically — no
+manual mapping needed, unlike the old Kotlin-side integration). On any XHR failure
+(companion app not running, service stopped, wrong URL, etc.), the fetch is skipped and the
+watch keeps showing whatever it last had — no explicit "clear" on failure. Also re-fetches
+immediately on `webviewclosed` (i.e. right after the Settings screen is saved) so a changed
+`ServerUrl` takes effect without waiting for the next 15-minute cycle.
 
 ### Message keys
 
@@ -84,6 +91,7 @@ Current build (`build/js/message_keys.json` on the VM, 2026-07-11):
 | `ItemText`    | `10002`    | cstring     | ≤ 39 chars + NUL (`char text[40]`)   |
 | `ItemIndex`   | `10003`    | UInt8       | 0-based, `< ItemCount`               |
 | `ShowBattery` | `10004`    | UInt8       | `0` or `1` (see below)               |
+| `ServerUrl`   | `10005`    | cstring     | PKJS-only, see below — C ignores it  |
 
 `MAX_INFO_ITEMS = 8` (watchface-side buffer cap, `src/c/info-watchface.c`).
 
@@ -104,6 +112,15 @@ sends the settings dict over the **same** `AppMessage` inbox as calendar sync �
   top-right corner. Watchface persists it via `persist_write_bool()`
   (`PERSIST_KEY_SHOW_BATTERY = 1`) and re-reads it on every cold start, so it survives
   app relaunch without waiting for the phone to resend it.
+- **`ServerUrl`** (default `http://127.0.0.1:47225/items`, shared between `config.js` and
+  `index.js` via `src/pkjs/config-defaults.js` so the two can't drift): the URL PKJS fetches
+  items from — see "Local HTTP API" above, not restricted to the companion app. This one is
+  declared as a message key purely so Clay's `prepareForAppMessage()` has a valid numeric ID
+  to serialize it under (an undeclared key produces a `NaN` AppMessage key and silently
+  breaks the whole save, including `ShowBattery` in the same message); the watch's C code
+  never reads it. PKJS itself reads the live value straight out of Clay's
+  `localStorage['clay-settings']` (`getServerUrl()`), not from AppMessage — see
+  "PebbleKit JS" above.
 
 **Target platforms:** `emery` (Pebble Time 2), `flint` (Pebble 2 Duo), `gabbro` (Pebble
 Round 2) only — `aplite`/`basalt`/`chalk`/`diorite` were dropped from

@@ -13,11 +13,23 @@
 // wiring needed here (see node_modules/@rebble/clay/index.js).
 var Clay = require('@rebble/clay');
 var clayConfig = require('./config');
+var defaults = require('./config-defaults');
 var clay = new Clay(clayConfig); // eslint-disable-line no-unused-vars
 
-var SERVER_URL = 'http://127.0.0.1:47225/items';
 var REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 var XHR_TIMEOUT_MS = 5000;
+
+// ServerUrl is a Clay setting (see config.js) but only PKJS reads it -- the
+// watch's C code has no use for it. Clay still writes it to localStorage
+// under 'clay-settings' on every save, same as any other config field.
+function getServerUrl() {
+  try {
+    var settings = JSON.parse(localStorage.getItem('clay-settings') || '{}');
+    return settings.ServerUrl || defaults.DEFAULT_SERVER_URL;
+  } catch (e) {
+    return defaults.DEFAULT_SERVER_URL;
+  }
+}
 
 function sendItemAt(items, index, total) {
   if (index >= total) {
@@ -71,7 +83,7 @@ function fetchAndSync() {
   xhr.ontimeout = function () {
     console.log('pkjs: XHR timed out - is the companion app running?');
   };
-  xhr.open('GET', SERVER_URL, true);
+  xhr.open('GET', getServerUrl(), true);
   xhr.send();
 }
 
@@ -79,4 +91,13 @@ Pebble.addEventListener('ready', function () {
   console.log('pkjs: ready');
   fetchAndSync();
   setInterval(fetchAndSync, REFRESH_INTERVAL_MS);
+});
+
+// Re-fetch immediately on save so a new Info Source URL takes effect right
+// away instead of waiting up to REFRESH_INTERVAL_MS.
+Pebble.addEventListener('webviewclosed', function (e) {
+  if (!e || !e.response) {
+    return;
+  }
+  fetchAndSync();
 });

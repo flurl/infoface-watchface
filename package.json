@@ -27,7 +27,8 @@
       "ItemPrefix",
       "ItemText",
       "ItemIndex",
-      "ShowBattery"
+      "ShowBattery",
+      "ServerUrl"
     ],
     "resources": {
       "media": []
