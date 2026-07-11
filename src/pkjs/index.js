@@ -8,6 +8,13 @@
 // PebbleKit JS runs inside the Pebble/Core app itself and does not hit the
 // same bug.
 
+// Clay auto-registers 'showConfiguration'/'webviewclosed' listeners and
+// sends the settings dict via Pebble.sendAppMessage() itself -- no manual
+// wiring needed here (see node_modules/@rebble/clay/index.js).
+var Clay = require('@rebble/clay');
+var clayConfig = require('./config');
+var clay = new Clay(clayConfig); // eslint-disable-line no-unused-vars
+
 var SERVER_URL = 'http://127.0.0.1:47225/items';
 var REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 var XHR_TIMEOUT_MS = 5000;

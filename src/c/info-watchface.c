@@ -31,6 +31,10 @@ static Layer *s_battery_layer;
 static char s_time_buf[8];
 static char s_date_buf[24];
 
+// Watch settings (Clay config page, see PROTOCOL.md).
+#define PERSIST_KEY_SHOW_BATTERY 1
+static bool s_show_battery = true;
+
 // Generic info item: `prefix` is a short left column (a time, a source tag
 // like "RSS", etc.), `text` is the main line (event title, headline, ...).
 typedef struct {
@@ -64,11 +68,20 @@ static void prv_load_dummy_items(void) {
   s_item_count++;
 }
 
-// AppMessage inbox: see PROTOCOL.md for the full contract. Two shapes of
-// message arrive from the companion app:
+// AppMessage inbox: see PROTOCOL.md for the full contract. Three shapes of
+// message arrive:
+//   - {ShowBattery: 0|1}                               -- from the Clay settings page
 //   - {ItemCount: N}                                  -- resets the list
 //   - {ItemIndex: i, ItemPrefix: "...", ItemText: "..."} -- one item
 static void prv_inbox_received_handler(DictionaryIterator *iterator, void *context) {
+  Tuple *show_battery_tuple = dict_find(iterator, MESSAGE_KEY_ShowBattery);
+  if (show_battery_tuple) {
+    s_show_battery = show_battery_tuple->value->uint8 != 0;
+    persist_write_bool(PERSIST_KEY_SHOW_BATTERY, s_show_battery);
+    layer_set_hidden(s_battery_layer, !s_show_battery);
+    return;
+  }
+
   Tuple *count_tuple = dict_find(iterator, MESSAGE_KEY_ItemCount);
   if (count_tuple) {
     int count = count_tuple->value->uint8;
@@ -258,6 +271,7 @@ static void prv_window_load(Window *window) {
   s_battery_layer = layer_create(GRect(bounds.size.w - battery_w - battery_margin, battery_margin,
                                         battery_w, battery_h));
   layer_set_update_proc(s_battery_layer, prv_battery_update_proc);
+  layer_set_hidden(s_battery_layer, !s_show_battery);
   layer_add_child(window_layer, s_battery_layer);
 
   s_info_layer = layer_create(GRect(0, mid, bounds.size.w, bounds.size.h - mid));
@@ -274,6 +288,10 @@ static void prv_window_unload(Window *window) {
 
 static void prv_init(void) {
   prv_load_dummy_items();
+
+  if (persist_exists(PERSIST_KEY_SHOW_BATTERY)) {
+    s_show_battery = persist_read_bool(PERSIST_KEY_SHOW_BATTERY);
+  }
 
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);

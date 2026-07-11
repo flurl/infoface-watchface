@@ -6,17 +6,15 @@
     "pebble-app"
   ],
   "private": true,
-  "dependencies": {},
+  "dependencies": {
+    "@rebble/clay": "^1.0.10"
+  },
   "pebble": {
     "displayName": "Info",
     "uuid": "8047c3ec-ee69-418d-b0f1-3da7371aee63",
     "sdkVersion": "3",
     "enableMultiJS": true,
     "targetPlatforms": [
-      "aplite",
-      "basalt",
-      "chalk",
-      "diorite",
       "emery",
       "flint",
       "gabbro"
@@ -28,7 +26,8 @@
       "ItemCount",
       "ItemPrefix",
       "ItemText",
-      "ItemIndex"
+      "ItemIndex",
+      "ShowBattery"
     ],
     "resources": {
       "media": []

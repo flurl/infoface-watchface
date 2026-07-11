@@ -77,14 +77,37 @@ starting at 10000.
 
 Current build (`build/js/message_keys.json` on the VM, 2026-07-11):
 
-| Key name     | Numeric ID | Pebble type | Constraint                          |
-|--------------|-----------:|-------------|--------------------------------------|
-| `ItemCount`  | `10000`    | UInt8       | 0–8 (see `MAX_INFO_ITEMS`)           |
-| `ItemPrefix` | `10001`    | cstring     | ≤ 7 chars + NUL (`char prefix[8]`)   |
-| `ItemText`   | `10002`    | cstring     | ≤ 39 chars + NUL (`char text[40]`)   |
-| `ItemIndex`  | `10003`    | UInt8       | 0-based, `< ItemCount`               |
+| Key name      | Numeric ID | Pebble type | Constraint                          |
+|---------------|-----------:|-------------|--------------------------------------|
+| `ItemCount`   | `10000`    | UInt8       | 0–8 (see `MAX_INFO_ITEMS`)           |
+| `ItemPrefix`  | `10001`    | cstring     | ≤ 7 chars + NUL (`char prefix[8]`)   |
+| `ItemText`    | `10002`    | cstring     | ≤ 39 chars + NUL (`char text[40]`)   |
+| `ItemIndex`   | `10003`    | UInt8       | 0-based, `< ItemCount`               |
+| `ShowBattery` | `10004`    | UInt8       | `0` or `1` (see below)               |
 
 `MAX_INFO_ITEMS = 8` (watchface-side buffer cap, `src/c/info-watchface.c`).
+
+## Watch settings (Clay)
+
+The watch's Settings screen (accessed from the phone's Pebble/Core app, per-watchapp
+"gear" icon) is a `src/pkjs/config.js` schema rendered by
+[`@rebble/clay`](https://github.com/pebble-dev/clay) — **not** the stale official
+`pebble-clay` npm package (frozen at 1.0.4, no `flint`/`gabbro` support). This is a
+deliberate exception to generally preferring repebble over rebble sources: the
+community-maintained fork is the only one that builds for two of our three target
+platforms. Clay auto-registers the `showConfiguration`/`webviewclosed` PKJS
+event handlers itself (`src/pkjs/index.js` just constructs `new Clay(clayConfig)`) and
+sends the settings dict over the **same** `AppMessage` inbox as calendar sync — Clay's
+`prepareForAppMessage()` converts JS booleans to `0`/`1` before sending.
+
+- **`ShowBattery`** (`0`/`1`, default `1`): shows/hides the battery indicator in the
+  top-right corner. Watchface persists it via `persist_write_bool()`
+  (`PERSIST_KEY_SHOW_BATTERY = 1`) and re-reads it on every cold start, so it survives
+  app relaunch without waiting for the phone to resend it.
+
+**Target platforms:** `emery` (Pebble Time 2), `flint` (Pebble 2 Duo), `gabbro` (Pebble
+Round 2) only — `aplite`/`basalt`/`chalk`/`diorite` were dropped from
+`package.json`'s `targetPlatforms` since those are the three watches actually in use.
 
 ### Message flow
 

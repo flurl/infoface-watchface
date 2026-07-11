@@ -2,3 +2,6 @@
 /build/
 .lock-waf_linux_build
 *.pbw
+
+# Dependencies (npm install)
+/node_modules/
