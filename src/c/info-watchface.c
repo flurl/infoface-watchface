@@ -14,7 +14,7 @@
 // Info Watchface
 //
 // Top half:    digital clock (HH:MM) + date (Weekday YYYY-MM-DD), battery
-//              icon in the top-right corner.
+//              icon top-right, quiet-time icon top-left.
 // Bottom half: a generic scrolling-capable info feed. The item model below
 // (InfoItem) is intentionally source-agnostic: a companion app pushes items
 // here from calendars, RSS/feeds, social streams, notifications, etc. via
@@ -27,13 +27,16 @@ static TextLayer *s_time_layer;
 static TextLayer *s_date_layer;
 static Layer *s_info_layer;
 static Layer *s_battery_layer;
+static Layer *s_quiet_time_layer;
 
 static char s_time_buf[8];
 static char s_date_buf[24];
 
 // Watch settings (Clay config page, see PROTOCOL.md).
 #define PERSIST_KEY_SHOW_BATTERY 1
+#define PERSIST_KEY_SHOW_QUIET_TIME 2
 static bool s_show_battery = true;
+static bool s_show_quiet_time = true;
 
 // Generic info item: `prefix` is a short left column (a time, a source tag
 // like "RSS", etc.), `text` is the main line (event title, headline, ...).
@@ -68,17 +71,32 @@ static void prv_load_dummy_items(void) {
   s_item_count++;
 }
 
-// AppMessage inbox: see PROTOCOL.md for the full contract. Three shapes of
-// message arrive:
-//   - {ShowBattery: 0|1}                               -- from the Clay settings page
+// AppMessage inbox: see PROTOCOL.md for the full contract. Messages arrive
+// in one of these shapes:
+//   - {ShowBattery: 0|1, ShowQuietTime: 0|1, ServerUrl: "..."} (any subset)
+//     -- from the Clay settings page, all changed fields in one message
 //   - {ItemCount: N}                                  -- resets the list
 //   - {ItemIndex: i, ItemPrefix: "...", ItemText: "..."} -- one item
 static void prv_inbox_received_handler(DictionaryIterator *iterator, void *context) {
+  bool handled_setting = false;
+
   Tuple *show_battery_tuple = dict_find(iterator, MESSAGE_KEY_ShowBattery);
   if (show_battery_tuple) {
     s_show_battery = show_battery_tuple->value->uint8 != 0;
     persist_write_bool(PERSIST_KEY_SHOW_BATTERY, s_show_battery);
     layer_set_hidden(s_battery_layer, !s_show_battery);
+    handled_setting = true;
+  }
+
+  Tuple *show_quiet_time_tuple = dict_find(iterator, MESSAGE_KEY_ShowQuietTime);
+  if (show_quiet_time_tuple) {
+    s_show_quiet_time = show_quiet_time_tuple->value->uint8 != 0;
+    persist_write_bool(PERSIST_KEY_SHOW_QUIET_TIME, s_show_quiet_time);
+    layer_set_hidden(s_quiet_time_layer, !s_show_quiet_time);
+    handled_setting = true;
+  }
+
+  if (handled_setting) {
     return;
   }
 
@@ -220,6 +238,28 @@ static void prv_battery_handler(BatteryChargeState charge) {
   layer_mark_dirty(s_battery_layer);
 }
 
+// Quiet-time icon: a crescent moon, drawn only while quiet_time_is_active().
+// There's no subscribe/event API for quiet time (only the peek-style
+// quiet_time_is_active()), so this is re-checked on every minute tick
+// alongside the clock, not pushed on change like the battery icon is.
+static void prv_quiet_time_update_proc(Layer *layer, GContext *ctx) {
+  if (!quiet_time_is_active()) {
+    return;
+  }
+
+  GRect bounds = layer_get_bounds(layer);
+  const int radius = 6;
+  GPoint center = GPoint(radius + 2, bounds.size.h / 2);
+
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_circle(ctx, center, radius);
+
+  // Punch out a crescent by overpainting with the (always-black) window
+  // background, offset up and to the right.
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_circle(ctx, GPoint(center.x + 3, center.y - 2), radius);
+}
+
 static void prv_update_time(void) {
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
@@ -233,6 +273,7 @@ static void prv_update_time(void) {
 
 static void prv_tick_handler(struct tm *tick_time, TimeUnits units_changed) {
   prv_update_time();
+  layer_mark_dirty(s_quiet_time_layer);
 }
 
 static void prv_window_load(Window *window) {
@@ -265,14 +306,21 @@ static void prv_window_load(Window *window) {
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(window_layer, text_layer_get_layer(s_date_layer));
 
-  const int battery_w = 24;
-  const int battery_h = 12;
-  const int battery_margin = 4;
-  s_battery_layer = layer_create(GRect(bounds.size.w - battery_w - battery_margin, battery_margin,
-                                        battery_w, battery_h));
+  const int corner_icon_w = 24;
+  const int corner_icon_h = 12;
+  const int corner_icon_margin = 4;
+
+  s_battery_layer = layer_create(GRect(bounds.size.w - corner_icon_w - corner_icon_margin,
+                                        corner_icon_margin, corner_icon_w, corner_icon_h));
   layer_set_update_proc(s_battery_layer, prv_battery_update_proc);
   layer_set_hidden(s_battery_layer, !s_show_battery);
   layer_add_child(window_layer, s_battery_layer);
+
+  s_quiet_time_layer = layer_create(GRect(corner_icon_margin, corner_icon_margin,
+                                           corner_icon_w, corner_icon_h));
+  layer_set_update_proc(s_quiet_time_layer, prv_quiet_time_update_proc);
+  layer_set_hidden(s_quiet_time_layer, !s_show_quiet_time);
+  layer_add_child(window_layer, s_quiet_time_layer);
 
   s_info_layer = layer_create(GRect(0, mid, bounds.size.w, bounds.size.h - mid));
   layer_set_update_proc(s_info_layer, prv_info_update_proc);
@@ -283,6 +331,7 @@ static void prv_window_unload(Window *window) {
   text_layer_destroy(s_time_layer);
   text_layer_destroy(s_date_layer);
   layer_destroy(s_battery_layer);
+  layer_destroy(s_quiet_time_layer);
   layer_destroy(s_info_layer);
 }
 
@@ -291,6 +340,9 @@ static void prv_init(void) {
 
   if (persist_exists(PERSIST_KEY_SHOW_BATTERY)) {
     s_show_battery = persist_read_bool(PERSIST_KEY_SHOW_BATTERY);
+  }
+  if (persist_exists(PERSIST_KEY_SHOW_QUIET_TIME)) {
+    s_show_quiet_time = persist_read_bool(PERSIST_KEY_SHOW_QUIET_TIME);
   }
 
   s_window = window_create();

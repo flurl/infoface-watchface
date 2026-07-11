@@ -28,6 +28,7 @@
       "ItemText",
       "ItemIndex",
       "ShowBattery",
+      "ShowQuietTime",
       "ServerUrl"
     ],
     "resources": {

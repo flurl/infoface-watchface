@@ -84,14 +84,15 @@ starting at 10000.
 
 Current build (`build/js/message_keys.json` on the VM, 2026-07-11):
 
-| Key name      | Numeric ID | Pebble type | Constraint                          |
-|---------------|-----------:|-------------|--------------------------------------|
-| `ItemCount`   | `10000`    | UInt8       | 0–8 (see `MAX_INFO_ITEMS`)           |
-| `ItemPrefix`  | `10001`    | cstring     | ≤ 7 chars + NUL (`char prefix[8]`)   |
-| `ItemText`    | `10002`    | cstring     | ≤ 39 chars + NUL (`char text[40]`)   |
-| `ItemIndex`   | `10003`    | UInt8       | 0-based, `< ItemCount`               |
-| `ShowBattery` | `10004`    | UInt8       | `0` or `1` (see below)               |
-| `ServerUrl`   | `10005`    | cstring     | PKJS-only, see below — C ignores it  |
+| Key name        | Numeric ID | Pebble type | Constraint                          |
+|-----------------|-----------:|-------------|--------------------------------------|
+| `ItemCount`     | `10000`    | UInt8       | 0–8 (see `MAX_INFO_ITEMS`)           |
+| `ItemPrefix`    | `10001`    | cstring     | ≤ 7 chars + NUL (`char prefix[8]`)   |
+| `ItemText`      | `10002`    | cstring     | ≤ 39 chars + NUL (`char text[40]`)   |
+| `ItemIndex`     | `10003`    | UInt8       | 0-based, `< ItemCount`               |
+| `ShowBattery`   | `10004`    | UInt8       | `0` or `1` (see below)               |
+| `ShowQuietTime` | `10005`    | UInt8       | `0` or `1` (see below)               |
+| `ServerUrl`     | `10006`    | cstring     | PKJS-only, see below — C ignores it  |
 
 `MAX_INFO_ITEMS = 8` (watchface-side buffer cap, `src/c/info-watchface.c`).
 
@@ -112,6 +113,13 @@ sends the settings dict over the **same** `AppMessage` inbox as calendar sync �
   top-right corner. Watchface persists it via `persist_write_bool()`
   (`PERSIST_KEY_SHOW_BATTERY = 1`) and re-reads it on every cold start, so it survives
   app relaunch without waiting for the phone to resend it.
+- **`ShowQuietTime`** (`0`/`1`, default `1`): shows/hides the quiet-time (crescent moon)
+  indicator in the top-left corner, same persist/re-read pattern as `ShowBattery`
+  (`PERSIST_KEY_SHOW_QUIET_TIME = 2`). Unlike the battery icon (pushed via
+  `battery_state_service_subscribe()`), there's no subscribe/event API for quiet time —
+  only the peek-style `quiet_time_is_active()` — so the icon's update proc is just
+  re-triggered on every minute tick alongside the clock; a quiet-time toggle can take up to
+  a minute to appear/disappear.
 - **`ServerUrl`** (default `http://127.0.0.1:47225/items`, shared between `config.js` and
   `index.js` via `src/pkjs/config-defaults.js` so the two can't drift): the URL PKJS fetches
   items from — see "Local HTTP API" above, not restricted to the companion app. This one is
@@ -121,6 +129,14 @@ sends the settings dict over the **same** `AppMessage` inbox as calendar sync �
   never reads it. PKJS itself reads the live value straight out of Clay's
   `localStorage['clay-settings']` (`getServerUrl()`), not from AppMessage — see
   "PebbleKit JS" above.
+
+**Inbox handler contract:** every save sends **all** changed Clay fields in a single
+`AppMessage` dict (Clay's `getSettings()` re-serializes the whole form, not just the diff).
+`prv_inbox_received_handler()` in `src/c/info-watchface.c` must therefore check every
+settings key with an independent `if (dict_find(...))` block — not an early `return` after
+the first match — before falling through to the calendar-sync (`ItemCount`/`ItemIndex`)
+branches below. (This was a real bug during development: `ShowQuietTime` silently never
+applied because the `ShowBattery` branch returned first.)
 
 **Target platforms:** `emery` (Pebble Time 2), `flint` (Pebble 2 Duo), `gabbro` (Pebble
 Round 2) only — `aplite`/`basalt`/`chalk`/`diorite` were dropped from
@@ -153,10 +169,12 @@ No acknowledgement message flows watch→phone in this version — v1 is phone-t
 
 ## Implementation notes
 
-- **Watchface C (`src/c/info-watchface.c`):** ✅ unchanged since v1 — this bridge only changes
-  *who* sends the `AppMessage`, not its shape. `app_message_register_inbox_received()` handler,
-  `prv_load_dummy_items()` cold-start fallback, bounds-checking, `strncpy` truncation — all as
-  before.
+- **Watchface C (`src/c/info-watchface.c`):** the PKJS bridge itself only changed *who* sends
+  the `AppMessage`, not its shape — `app_message_register_inbox_received()` handler,
+  `prv_load_dummy_items()` cold-start fallback, bounds-checking, `strncpy` truncation are all
+  as in v1. The calendar-sync item path is unchanged; corner-icon settings (`ShowBattery`,
+  `ShowQuietTime`, see "Watch settings" above) were added later and share the same inbox
+  handler.
 - **`package.json`:** `pebble.companionApp.android.apps[0].package` =
   `family.dieflomis.infocompanion` is kept even though the companion app no longer uses
   PebbleKit2 — it's still useful for Core app onboarding UX (suggesting the companion app to

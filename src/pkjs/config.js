@@ -25,6 +25,12 @@ module.exports = [
     "defaultValue": true
   },
   {
+    "type": "toggle",
+    "messageKey": "ShowQuietTime",
+    "label": "Show Quiet Time Indicator",
+    "defaultValue": true
+  },
+  {
     "type": "submit",
     "defaultValue": "Save"
   }
