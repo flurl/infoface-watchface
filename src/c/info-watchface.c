@@ -13,7 +13,8 @@
 // ---------------------------------------------------------------------------
 // Info Watchface
 //
-// Top half:    digital clock (HH:MM) + date (Weekday YYYY-MM-DD)
+// Top half:    digital clock (HH:MM) + date (Weekday YYYY-MM-DD), battery
+//              icon in the top-right corner.
 // Bottom half: a generic scrolling-capable info feed. The item model below
 // (InfoItem) is intentionally source-agnostic: a companion app pushes items
 // here from calendars, RSS/feeds, social streams, notifications, etc. via
@@ -25,6 +26,7 @@ static Window *s_window;
 static TextLayer *s_time_layer;
 static TextLayer *s_date_layer;
 static Layer *s_info_layer;
+static Layer *s_battery_layer;
 
 static char s_time_buf[8];
 static char s_date_buf[24];
@@ -139,6 +141,72 @@ static void prv_info_update_proc(Layer *layer, GContext *ctx) {
   }
 }
 
+// Battery icon: outline + a fill bar proportional to charge, red when
+// charge is low (<=20%) and not charging, plus a small lightning bolt
+// overlay while charging/plugged in.
+static void prv_battery_update_proc(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_bounds(layer);
+
+  BatteryChargeState state = battery_state_service_peek();
+  int percent = state.charge_percent;
+  bool charging = state.is_charging || state.is_plugged;
+
+  const int body_w = 16;
+  const int body_h = 10;
+  const int nub_w = 2;
+  const int nub_h = 4;
+  const int body_x = 0;
+  const int body_y = (bounds.size.h - body_h) / 2;
+
+  GRect body_rect = GRect(body_x, body_y, body_w, body_h);
+  graphics_context_set_stroke_color(ctx, GColorWhite);
+  graphics_draw_rect(ctx, body_rect);
+
+  GRect nub_rect = GRect(body_x + body_w, body_y + (body_h - nub_h) / 2, nub_w, nub_h);
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_rect(ctx, nub_rect, 0, GCornerNone);
+
+  // Fill inset 2px inside the outline, width proportional to charge.
+  const int pad = 2;
+  int fill_max_w = body_w - 2 * pad;
+  int fill_w = (fill_max_w * percent) / 100;
+  if (fill_w < 0) {
+    fill_w = 0;
+  }
+  if (fill_w > fill_max_w) {
+    fill_w = fill_max_w;
+  }
+
+  GColor fill_color = (percent <= 20 && !charging) ? GColorRed : GColorWhite;
+  graphics_context_set_fill_color(ctx, fill_color);
+  if (fill_w > 0) {
+    graphics_fill_rect(ctx, GRect(body_x + pad, body_y + pad, fill_w, body_h - 2 * pad), 0, GCornerNone);
+  }
+
+  if (charging) {
+    GPoint bolt_points[] = {
+      {body_x + 9, body_y + 1},
+      {body_x + 5, body_y + 6},
+      {body_x + 8, body_y + 6},
+      {body_x + 6, body_y + 9},
+      {body_x + 11, body_y + 4},
+      {body_x + 8, body_y + 4},
+    };
+    GPathInfo bolt_info = {
+      .num_points = 6,
+      .points = bolt_points,
+    };
+    GPath *bolt_path = gpath_create(&bolt_info);
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    gpath_draw_filled(ctx, bolt_path);
+    gpath_destroy(bolt_path);
+  }
+}
+
+static void prv_battery_handler(BatteryChargeState charge) {
+  layer_mark_dirty(s_battery_layer);
+}
+
 static void prv_update_time(void) {
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
@@ -184,6 +252,14 @@ static void prv_window_load(Window *window) {
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(window_layer, text_layer_get_layer(s_date_layer));
 
+  const int battery_w = 24;
+  const int battery_h = 12;
+  const int battery_margin = 4;
+  s_battery_layer = layer_create(GRect(bounds.size.w - battery_w - battery_margin, battery_margin,
+                                        battery_w, battery_h));
+  layer_set_update_proc(s_battery_layer, prv_battery_update_proc);
+  layer_add_child(window_layer, s_battery_layer);
+
   s_info_layer = layer_create(GRect(0, mid, bounds.size.w, bounds.size.h - mid));
   layer_set_update_proc(s_info_layer, prv_info_update_proc);
   layer_add_child(window_layer, s_info_layer);
@@ -192,6 +268,7 @@ static void prv_window_load(Window *window) {
 static void prv_window_unload(Window *window) {
   text_layer_destroy(s_time_layer);
   text_layer_destroy(s_date_layer);
+  layer_destroy(s_battery_layer);
   layer_destroy(s_info_layer);
 }
 
@@ -210,11 +287,14 @@ static void prv_init(void) {
   app_message_register_inbox_dropped(prv_inbox_dropped_handler);
   app_message_open(app_message_inbox_size_maximum(), app_message_outbox_size_maximum());
 
+  battery_state_service_subscribe(prv_battery_handler);
+
   tick_timer_service_subscribe(MINUTE_UNIT, prv_tick_handler);
   prv_update_time();
 }
 
 static void prv_deinit(void) {
+  battery_state_service_unsubscribe();
   tick_timer_service_unsubscribe();
   window_destroy(s_window);
 }
