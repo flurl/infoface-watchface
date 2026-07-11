@@ -1,0 +1,4 @@
+# Build outputs
+/build/
+.lock-waf_linux_build
+*.pbw

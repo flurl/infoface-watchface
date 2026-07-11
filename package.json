@@ -1,0 +1,47 @@
+{
+  "name": "info-watchface",
+  "author": "Florian Klug-Göri",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Info",
+    "uuid": "8047c3ec-ee69-418d-b0f1-3da7371aee63",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery",
+      "flint",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": true
+    },
+    "messageKeys": [
+      "ItemCount",
+      "ItemPrefix",
+      "ItemText",
+      "ItemIndex"
+    ],
+    "resources": {
+      "media": []
+    },
+    "companionApp": {
+      "android": {
+        "url": "",
+        "apps": [
+          {
+            "package": "family.dieflomis.infocompanion"
+          }
+        ]
+      }
+    }
+  }
+}
