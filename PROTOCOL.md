@@ -189,7 +189,10 @@ No acknowledgement message flows watch→phone in this version — v1 is phone-t
 - `ItemPrefix` (events) = weekday + start time, `EEE HH:mm` (24h), e.g. `"Fri 09:00"`, or
   `"EEE •"` (e.g. `"Fri •"`) for all-day events. The weekday is included so items from different
   days are distinguishable at a glance, in addition to the divider between day groups. Empty for
-  dividers.
+  dividers. A **multi-day event is expanded into one item per calendar day it covers** (within the
+  window), each grouped under its own day; the prefix carries a span marker instead of a time:
+  `"EEE |->"` on the event's first day, `"EEE <->"` while it is ongoing, and `"EEE <-|"` on its
+  last day (e.g. `"Fri |->"`, `"Sat <->"`, `"Sun <-|"`).
 - `ItemText` = event title, truncated to 39 chars by the **companion app** (`CalendarReader
   .kt`) before it's ever served over HTTP. Empty for dividers.
 - The companion app reads events from the start of today through the next **7 days**, sorts them
