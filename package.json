@@ -30,7 +30,8 @@
       "ShowBattery",
       "ShowQuietTime",
       "ShowBluetooth",
-      "ServerUrl"
+      "ServerUrl",
+      "ItemType"
     ],
     "resources": {
       "media": []

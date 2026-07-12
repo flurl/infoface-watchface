@@ -46,10 +46,18 @@ static bool s_show_bluetooth_alert = true;
 // at launch, and not on reconnects). Seeded from a peek in prv_init().
 static bool s_bt_connected = true;
 
-// Generic info item: `prefix` is a short left column (a time, a source tag
-// like "RSS", etc.), `text` is the main line (event title, headline, ...).
+// Info item type (shared by *value* with the companion app / PKJS, see
+// PROTOCOL.md). Divider rows render as a horizontal rule and ignore
+// prefix/text; event/other rows render the prefix + text columns.
+#define ITEM_TYPE_DIVIDER 0
+#define ITEM_TYPE_EVENT 1
+#define ITEM_TYPE_OTHER 255
+
+// Generic info item: `prefix` is a short left column (a weekday+time, a source
+// tag like "RSS", etc.), `text` is the main line (event title, headline, ...).
 typedef struct {
-  char prefix[8];
+  uint8_t type;
+  char prefix[12];
   char text[40];
 } InfoItem;
 
@@ -58,25 +66,23 @@ static InfoItem s_items[MAX_INFO_ITEMS];
 static int s_item_count = 0;
 
 static const int ROW_HEIGHT = 22;
+static const int DIVIDER_ROW_HEIGHT = 12;
+
+static void prv_set_item(int i, uint8_t type, const char *prefix, const char *text) {
+  s_items[i].type = type;
+  strncpy(s_items[i].prefix, prefix, sizeof(s_items[i].prefix) - 1);
+  s_items[i].prefix[sizeof(s_items[i].prefix) - 1] = '\0';
+  strncpy(s_items[i].text, text, sizeof(s_items[i].text) - 1);
+  s_items[i].text[sizeof(s_items[i].text) - 1] = '\0';
+}
 
 static void prv_load_dummy_items(void) {
   s_item_count = 0;
-
-  strncpy(s_items[s_item_count].prefix, "09:00", sizeof(s_items[s_item_count].prefix));
-  strncpy(s_items[s_item_count].text, "Standup", sizeof(s_items[s_item_count].text));
-  s_item_count++;
-
-  strncpy(s_items[s_item_count].prefix, "12:30", sizeof(s_items[s_item_count].prefix));
-  strncpy(s_items[s_item_count].text, "Lunch w/ Sam", sizeof(s_items[s_item_count].text));
-  s_item_count++;
-
-  strncpy(s_items[s_item_count].prefix, "15:00", sizeof(s_items[s_item_count].prefix));
-  strncpy(s_items[s_item_count].text, "1:1", sizeof(s_items[s_item_count].text));
-  s_item_count++;
-
-  strncpy(s_items[s_item_count].prefix, "18:30", sizeof(s_items[s_item_count].prefix));
-  strncpy(s_items[s_item_count].text, "Gym", sizeof(s_items[s_item_count].text));
-  s_item_count++;
+  prv_set_item(s_item_count++, ITEM_TYPE_EVENT, "Mon 09:00", "Standup");
+  prv_set_item(s_item_count++, ITEM_TYPE_EVENT, "Mon 12:30", "Lunch w/ Sam");
+  prv_set_item(s_item_count++, ITEM_TYPE_DIVIDER, "", "");
+  prv_set_item(s_item_count++, ITEM_TYPE_EVENT, "Tue 15:00", "1:1");
+  prv_set_item(s_item_count++, ITEM_TYPE_EVENT, "Tue 18:30", "Gym");
 }
 
 // AppMessage inbox: see PROTOCOL.md for the full contract. Messages arrive
@@ -129,9 +135,7 @@ static void prv_inbox_received_handler(DictionaryIterator *iterator, void *conte
   }
 
   Tuple *index_tuple = dict_find(iterator, MESSAGE_KEY_ItemIndex);
-  Tuple *prefix_tuple = dict_find(iterator, MESSAGE_KEY_ItemPrefix);
-  Tuple *text_tuple = dict_find(iterator, MESSAGE_KEY_ItemText);
-  if (!index_tuple || !prefix_tuple || !text_tuple) {
+  if (!index_tuple) {
     return;
   }
 
@@ -140,11 +144,26 @@ static void prv_inbox_received_handler(DictionaryIterator *iterator, void *conte
     return;
   }
 
-  strncpy(s_items[index].prefix, prefix_tuple->value->cstring, sizeof(s_items[index].prefix) - 1);
-  s_items[index].prefix[sizeof(s_items[index].prefix) - 1] = '\0';
+  // ItemType is optional for back-compat: a message without it is an event.
+  // Dividers may omit (or send empty) prefix/text.
+  Tuple *type_tuple = dict_find(iterator, MESSAGE_KEY_ItemType);
+  s_items[index].type = type_tuple ? type_tuple->value->uint8 : ITEM_TYPE_EVENT;
 
-  strncpy(s_items[index].text, text_tuple->value->cstring, sizeof(s_items[index].text) - 1);
-  s_items[index].text[sizeof(s_items[index].text) - 1] = '\0';
+  Tuple *prefix_tuple = dict_find(iterator, MESSAGE_KEY_ItemPrefix);
+  if (prefix_tuple) {
+    strncpy(s_items[index].prefix, prefix_tuple->value->cstring, sizeof(s_items[index].prefix) - 1);
+    s_items[index].prefix[sizeof(s_items[index].prefix) - 1] = '\0';
+  } else {
+    s_items[index].prefix[0] = '\0';
+  }
+
+  Tuple *text_tuple = dict_find(iterator, MESSAGE_KEY_ItemText);
+  if (text_tuple) {
+    strncpy(s_items[index].text, text_tuple->value->cstring, sizeof(s_items[index].text) - 1);
+    s_items[index].text[sizeof(s_items[index].text) - 1] = '\0';
+  } else {
+    s_items[index].text[0] = '\0';
+  }
 
   if (index + 1 > s_item_count) {
     s_item_count = index + 1;
@@ -168,14 +187,25 @@ static void prv_info_update_proc(Layer *layer, GContext *ctx) {
 
   int y = 6;
   for (int i = 0; i < s_item_count; i++) {
-    if (y + ROW_HEIGHT > bounds.size.h) {
+    bool is_divider = s_items[i].type == ITEM_TYPE_DIVIDER;
+    int row_h = is_divider ? DIVIDER_ROW_HEIGHT : ROW_HEIGHT;
+    if (y + row_h > bounds.size.h) {
       // Doesn't fit in the visible area; later this becomes a scroll offset
       // rather than a hard stop.
       break;
     }
 
-    GRect prefix_rect = GRect(4, y, 50, ROW_HEIGHT);
-    GRect text_rect = GRect(56, y, bounds.size.w - 60, ROW_HEIGHT);
+    if (is_divider) {
+      int line_y = y + row_h / 2;
+      graphics_context_set_stroke_color(ctx, GColorLightGray);
+      graphics_context_set_stroke_width(ctx, 1);
+      graphics_draw_line(ctx, GPoint(4, line_y), GPoint(bounds.size.w - 4, line_y));
+      y += row_h;
+      continue;
+    }
+
+    GRect prefix_rect = GRect(4, y, 70, row_h);
+    GRect text_rect = GRect(76, y, bounds.size.w - 80, row_h);
 
     graphics_context_set_text_color(ctx, PBL_IF_COLOR_ELSE(GColorVividCerulean, GColorWhite));
     graphics_draw_text(ctx, s_items[i].prefix, prefix_font, prefix_rect,
@@ -185,7 +215,7 @@ static void prv_info_update_proc(Layer *layer, GContext *ctx) {
     graphics_draw_text(ctx, s_items[i].text, text_font, text_rect,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-    y += ROW_HEIGHT;
+    y += row_h;
   }
 }
 

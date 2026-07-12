@@ -56,12 +56,21 @@ companion app is just the **default** source:
   (after the `READ_CALENDAR` permission is granted); stoppable via the app's UI.
 - **Endpoint:** `GET /items` → `200 OK`, `Content-Type: application/json`:
   ```json
-  {"items": [{"prefix": "09:00", "text": "Standup"}, {"prefix": "12:30", "text": "Lunch w/ Sam"}]}
+  {"items": [
+    {"type": 1, "prefix": "Fri 09:00", "text": "Standup"},
+    {"type": 1, "prefix": "Fri 12:30", "text": "Lunch w/ Sam"},
+    {"type": 0, "prefix": "", "text": ""},
+    {"type": 1, "prefix": "Sat 10:00", "text": "Market"}
+  ]}
   ```
   Any other path → `404 Not Found`, `{}`.
-- Items are **sorted by start time ascending**, capped at 8, `prefix`/`text` already truncated
-  to the byte limits below (source of truth: `CalendarReader.kt`, reused from the pre-PKJS
-  design). PKJS does not re-truncate.
+- Each item carries a `type` (`0`=divider, `1`=event, `255`=other; see `ItemType` above). Divider
+  items have empty `prefix`/`text` and render as a horizontal rule on the watch. `type` is optional
+  in the JSON for back-compat — PKJS and the watch both default a missing `type` to event (`1`).
+- Items are **sorted by start time ascending**, grouped by calendar day with a divider inserted
+  between day groups (never a leading divider), capped at 8 items total (dividers included), with
+  `prefix`/`text` already truncated to the byte limits below (source of truth: `CalendarReader.kt`,
+  reused from the pre-PKJS design). PKJS does not re-truncate.
 - No auth — loopback-only is the security boundary (same phone, same user).
 
 ## PebbleKit JS (watchface → watch)
@@ -87,13 +96,14 @@ Current build (`build/js/message_keys.json` on the VM, 2026-07-12):
 | Key name        | Numeric ID | Pebble type | Constraint                          |
 |-----------------|-----------:|-------------|--------------------------------------|
 | `ItemCount`     | `10000`    | UInt8       | 0–8 (see `MAX_INFO_ITEMS`)           |
-| `ItemPrefix`    | `10001`    | cstring     | ≤ 7 chars + NUL (`char prefix[8]`)   |
+| `ItemPrefix`    | `10001`    | cstring     | ≤ 11 chars + NUL (`char prefix[12]`) |
 | `ItemText`      | `10002`    | cstring     | ≤ 39 chars + NUL (`char text[40]`)   |
 | `ItemIndex`     | `10003`    | UInt8       | 0-based, `< ItemCount`               |
 | `ShowBattery`   | `10004`    | UInt8       | `0` or `1` (see below)               |
 | `ShowQuietTime` | `10005`    | UInt8       | `0` or `1` (see below)               |
 | `ShowBluetooth` | `10006`    | UInt8       | `0` or `1` (see below)               |
 | `ServerUrl`     | `10007`    | cstring     | PKJS-only, see below — C ignores it  |
+| `ItemType`      | `10008`    | UInt8       | `0`=divider, `1`=event, `255`=other  |
 
 `MAX_INFO_ITEMS = 8` (watchface-side buffer cap, `src/c/info-watchface.c`).
 
@@ -165,26 +175,35 @@ callback before sending the next (see `sendItemAt()`'s recursive continuation in
    Watch clears its current item list on receipt (even if `N == 0` — an empty list is valid,
    e.g. no events today).
 2. **Items ×N:** for `i` in `0 until N`, one message:
-   `{ItemIndex: i, ItemPrefix: "<=7 chars>", ItemText: "<=39 chars>"}`.
+   `{ItemIndex: i, ItemType: 0|1|255, ItemPrefix: "<=11 chars>", ItemText: "<=39 chars>"}`.
    Watch writes into `s_items[i]`, and marks the info layer dirty as each item lands
-   (progressive rendering) rather than waiting for all N.
+   (progressive rendering) rather than waiting for all N. `ItemType` is optional (defaults to
+   event); divider items send empty (or omit) `ItemPrefix`/`ItemText`.
 
 No acknowledgement message flows watch→phone in this version — v1 is phone-to-watch only.
 
 ## Field semantics (calendar use case)
 
-- `ItemPrefix` = event start time, `HH:mm` (24h), e.g. `"09:00"`, or `"•"` for all-day events.
+- `ItemType` = `1` (event) for calendar events, `0` (divider) for the day-separator rows the
+  companion app inserts between calendar days. `255` (other) is reserved for future item kinds.
+- `ItemPrefix` (events) = weekday + start time, `EEE HH:mm` (24h), e.g. `"Fri 09:00"`, or
+  `"EEE •"` (e.g. `"Fri •"`) for all-day events. The weekday is included so items from different
+  days are distinguishable at a glance, in addition to the divider between day groups. Empty for
+  dividers.
 - `ItemText` = event title, truncated to 39 chars by the **companion app** (`CalendarReader
-  .kt`) before it's ever served over HTTP.
-- Items sent **sorted by start time ascending**, capped at the first 8 upcoming events for
-  the current day.
+  .kt`) before it's ever served over HTTP. Empty for dividers.
+- The companion app reads events from the start of today through the next **7 days**, sorts them
+  **by start time ascending**, inserts a divider before the first event of each new calendar day
+  (never a leading divider), and caps the combined list (events + dividers) at the first 8 items.
 
 ## Implementation notes
 
 - **Watchface C (`src/c/info-watchface.c`):** the PKJS bridge itself only changed *who* sends
   the `AppMessage`, not its shape — `app_message_register_inbox_received()` handler,
   `prv_load_dummy_items()` cold-start fallback, bounds-checking, `strncpy` truncation are all
-  as in v1. The calendar-sync item path is unchanged; corner-icon settings (`ShowBattery`,
+  as in v1. The calendar-sync item path gained an `ItemType` field (divider vs. event; dividers
+  render as a horizontal rule in `prv_info_update_proc`, events as before) and a wider
+  `prefix[12]` buffer for the `EEE HH:mm` weekday prefix; corner-icon settings (`ShowBattery`,
   `ShowQuietTime`, see "Watch settings" above) were added later and share the same inbox
   handler.
 - **`package.json`:** `pebble.companionApp.android.apps[0].package` =

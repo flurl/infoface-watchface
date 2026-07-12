@@ -38,8 +38,16 @@ function sendItemAt(items, index, total) {
   }
 
   var item = items[index];
+  // ItemType defaults to event (1) if the source omits it, for back-compat with
+  // JSON that predates the type field. Dividers send empty prefix/text. See PROTOCOL.md.
+  var type = (typeof item.type === 'number') ? item.type : 1;
   Pebble.sendAppMessage(
-    { 'ItemIndex': index, 'ItemPrefix': item.prefix, 'ItemText': item.text },
+    {
+      'ItemIndex': index,
+      'ItemType': type,
+      'ItemPrefix': item.prefix || '',
+      'ItemText': item.text || ''
+    },
     function () {
       sendItemAt(items, index + 1, total);
     },
