@@ -41,6 +41,11 @@ static bool s_show_battery = true;
 static bool s_show_quiet_time = true;
 static bool s_show_bluetooth_alert = true;
 
+// Last-seen phone connection state, so the disconnect alert only fires on a
+// real connected -> disconnected transition (not when the handler is primed
+// at launch, and not on reconnects). Seeded from a peek in prv_init().
+static bool s_bt_connected = true;
+
 // Generic info item: `prefix` is a short left column (a time, a source tag
 // like "RSS", etc.), `text` is the main line (event title, headline, ...).
 typedef struct {
@@ -351,15 +356,27 @@ static void prv_notification_update_proc(Layer *layer, GContext *ctx) {
   }
 }
 
+// Deliberately obtrusive disconnect buzz: four long pulses (on/off ms,
+// starting with "on"). Meant to be hard to miss versus a stock double pulse.
+static const uint32_t s_disconnect_vibe_segments[] = {
+  500, 200, 500, 200, 500, 200, 700,
+};
+
 // connection_service_subscribe() callback. Marks the notification area
 // dirty (it re-checks the live connection state itself via peek in
-// prv_bluetooth_should_show()) and fires the vibration alert on the
-// transition to disconnected.
+// prv_bluetooth_should_show()) and fires the vibration alert -- but only on a
+// genuine connected -> disconnected transition, so priming at launch and
+// reconnects stay silent.
 static void prv_bluetooth_handler(bool connected) {
   layer_mark_dirty(s_notification_layer);
-  if (!connected && s_show_bluetooth_alert) {
-    vibes_double_pulse();
+  if (s_bt_connected && !connected && s_show_bluetooth_alert) {
+    VibePattern pattern = {
+      .durations = s_disconnect_vibe_segments,
+      .num_segments = ARRAY_LENGTH(s_disconnect_vibe_segments),
+    };
+    vibes_enqueue_custom_pattern(pattern);
   }
+  s_bt_connected = connected;
 }
 
 static void prv_update_time(void) {
@@ -470,12 +487,14 @@ static void prv_init(void) {
 
   battery_state_service_subscribe(prv_battery_handler);
 
+  // Seed the connection tracker without buzzing. The icon itself renders from
+  // a live peek in prv_bluetooth_should_show(), so the first window draw is
+  // already correct; we only need s_bt_connected primed so the handler can
+  // detect the next real disconnect transition.
+  s_bt_connected = connection_service_peek_pebble_app_connection();
   connection_service_subscribe((ConnectionHandlers) {
     .pebble_app_connection_handler = prv_bluetooth_handler,
   });
-  // Show the correct state from the start rather than waiting for the next
-  // connection change event.
-  prv_bluetooth_handler(connection_service_peek_pebble_app_connection());
 
   tick_timer_service_subscribe(MINUTE_UNIT, prv_tick_handler);
   prv_update_time();

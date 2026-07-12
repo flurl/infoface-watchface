@@ -122,12 +122,16 @@ sends the settings dict over the **same** `AppMessage` inbox as calendar sync �
   re-triggered on every minute tick alongside the clock; a quiet-time toggle can take up to
   a minute to appear/disappear.
 - **`ShowBluetooth`** (`0`/`1`, default `1`): enables the Bluetooth-disconnect alert — a
-  Bluetooth-rune icon in the top-left notification area plus a `vibes_double_pulse()` on the
-  transition to disconnected (see the part-5 tutorial pattern). Same persist/re-read pattern
-  (`PERSIST_KEY_SHOW_BLUETOOTH = 3`). Connection state DOES have a subscribe API
-  (`connection_service_subscribe()`), so the icon updates immediately on connect/disconnect;
-  the handler is also called once at init with the current state to render correctly from
-  the start. The setting gates both the icon and the vibration.
+  Bluetooth-rune icon in the top-left notification area plus an obtrusive custom vibe
+  (four long pulses, `vibes_enqueue_custom_pattern()`) on the transition to disconnected.
+  Same persist/re-read pattern (`PERSIST_KEY_SHOW_BLUETOOTH = 3`). Connection state DOES have
+  a subscribe API (`connection_service_subscribe()`), so the icon updates immediately on
+  connect/disconnect. The vibe fires **only on a genuine connected→disconnected transition**:
+  a `s_bt_connected` tracker is seeded from `connection_service_peek_pebble_app_connection()`
+  at init (without calling the handler, so launching the watchface while disconnected never
+  buzzes), and the handler buzzes only when it sees `s_bt_connected && !connected`. The icon
+  itself always renders from a live peek, so it's correct from the first draw regardless. The
+  setting gates both the icon and the vibration.
 - **`ServerUrl`** (default `http://127.0.0.1:47225/items`, shared between `config.js` and
   `index.js` via `src/pkjs/config-defaults.js` so the two can't drift): the URL PKJS fetches
   items from — see "Local HTTP API" above, not restricted to the companion app. This one is
