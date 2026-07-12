@@ -31,6 +31,13 @@ module.exports = [
     "defaultValue": true
   },
   {
+    "type": "toggle",
+    "messageKey": "ShowBluetooth",
+    "label": "Show Bluetooth Disconnect Alert",
+    "description": "Vibrate and show an icon when the watch loses its connection to the phone.",
+    "defaultValue": true
+  },
+  {
     "type": "submit",
     "defaultValue": "Save"
   }

@@ -82,7 +82,7 @@ Keys are declared by name in the watchface's `package.json` → `pebble.messageK
 Pebble build tool (`waf`) assigns each one a `uint32` at build time, in declaration order,
 starting at 10000.
 
-Current build (`build/js/message_keys.json` on the VM, 2026-07-11):
+Current build (`build/js/message_keys.json` on the VM, 2026-07-12):
 
 | Key name        | Numeric ID | Pebble type | Constraint                          |
 |-----------------|-----------:|-------------|--------------------------------------|
@@ -92,7 +92,8 @@ Current build (`build/js/message_keys.json` on the VM, 2026-07-11):
 | `ItemIndex`     | `10003`    | UInt8       | 0-based, `< ItemCount`               |
 | `ShowBattery`   | `10004`    | UInt8       | `0` or `1` (see below)               |
 | `ShowQuietTime` | `10005`    | UInt8       | `0` or `1` (see below)               |
-| `ServerUrl`     | `10006`    | cstring     | PKJS-only, see below — C ignores it  |
+| `ShowBluetooth` | `10006`    | UInt8       | `0` or `1` (see below)               |
+| `ServerUrl`     | `10007`    | cstring     | PKJS-only, see below — C ignores it  |
 
 `MAX_INFO_ITEMS = 8` (watchface-side buffer cap, `src/c/info-watchface.c`).
 
@@ -114,12 +115,19 @@ sends the settings dict over the **same** `AppMessage` inbox as calendar sync �
   (`PERSIST_KEY_SHOW_BATTERY = 1`) and re-reads it on every cold start, so it survives
   app relaunch without waiting for the phone to resend it.
 - **`ShowQuietTime`** (`0`/`1`, default `1`): shows/hides the quiet-time (crescent moon)
-  indicator in the top-left corner, same persist/re-read pattern as `ShowBattery`
+  indicator in the top-left notification area, same persist/re-read pattern as `ShowBattery`
   (`PERSIST_KEY_SHOW_QUIET_TIME = 2`). Unlike the battery icon (pushed via
   `battery_state_service_subscribe()`), there's no subscribe/event API for quiet time —
   only the peek-style `quiet_time_is_active()` — so the icon's update proc is just
   re-triggered on every minute tick alongside the clock; a quiet-time toggle can take up to
   a minute to appear/disappear.
+- **`ShowBluetooth`** (`0`/`1`, default `1`): enables the Bluetooth-disconnect alert — a
+  Bluetooth-rune icon in the top-left notification area plus a `vibes_double_pulse()` on the
+  transition to disconnected (see the part-5 tutorial pattern). Same persist/re-read pattern
+  (`PERSIST_KEY_SHOW_BLUETOOTH = 3`). Connection state DOES have a subscribe API
+  (`connection_service_subscribe()`), so the icon updates immediately on connect/disconnect;
+  the handler is also called once at init with the current state to render correctly from
+  the start. The setting gates both the icon and the vibration.
 - **`ServerUrl`** (default `http://127.0.0.1:47225/items`, shared between `config.js` and
   `index.js` via `src/pkjs/config-defaults.js` so the two can't drift): the URL PKJS fetches
   items from — see "Local HTTP API" above, not restricted to the companion app. This one is
