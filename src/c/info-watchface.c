@@ -67,6 +67,11 @@ static void prv_load_dummy_items(void) {
 //   - {ItemCount: N}                                  -- resets the list
 //   - {ItemIndex: i, ItemPrefix: "...", ItemText: "..."} -- one item
 static void prv_inbox_received_handler(DictionaryIterator *iterator, void *context) {
+  // DEBUG: proves whether any AppMessage reaches the watchface at all. During the
+  // FailedDifferentAppOpen repro the phone's send fails before delivery, so this
+  // line should NOT fire; if it does, the message got through after all.
+  APP_LOG(APP_LOG_LEVEL_DEBUG, "AppMessage inbox RECEIVED");
+
   Tuple *count_tuple = dict_find(iterator, MESSAGE_KEY_ItemCount);
   if (count_tuple) {
     int count = count_tuple->value->uint8;
