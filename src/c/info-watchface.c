@@ -19,8 +19,10 @@
 // Bottom half: a generic scrolling-capable info feed. The item model below
 // (InfoItem) is intentionally source-agnostic: a companion app pushes items
 // here from calendars, RSS/feeds, social streams, notifications, etc. via
-// AppMessage. See PROTOCOL.md for the wire format. Dummy data is shown
-// until the first real message arrives.
+// AppMessage. See PROTOCOL.md for the wire format. The most recently
+// received set of items is cached to persistent storage and shown on
+// launch, before the first message of a given session arrives; an empty
+// cache (or an empty update from the phone) renders as "Nothing to see".
 // ---------------------------------------------------------------------------
 
 static Window *s_window;
@@ -37,6 +39,13 @@ static char s_date_buf[24];
 #define PERSIST_KEY_SHOW_BATTERY 1
 #define PERSIST_KEY_SHOW_QUIET_TIME 2
 #define PERSIST_KEY_SHOW_BLUETOOTH 3
+// Info feed cache: PERSIST_KEY_ITEM_COUNT holds the item count, and each
+// item i is stored under its own key (PERSIST_KEY_ITEM_BASE + i) as a raw
+// InfoItem blob -- one key per item rather than one blob for the whole
+// list because PERSIST_DATA_MAX_LENGTH (256 bytes) is smaller than
+// MAX_INFO_ITEMS * sizeof(InfoItem).
+#define PERSIST_KEY_ITEM_COUNT 4
+#define PERSIST_KEY_ITEM_BASE 10
 static bool s_show_battery = true;
 static bool s_show_quiet_time = true;
 static bool s_show_bluetooth_alert = true;
@@ -68,21 +77,33 @@ static int s_item_count = 0;
 static const int ROW_HEIGHT = 22;
 static const int DIVIDER_ROW_HEIGHT = 12;
 
-static void prv_set_item(int i, uint8_t type, const char *prefix, const char *text) {
-  s_items[i].type = type;
-  strncpy(s_items[i].prefix, prefix, sizeof(s_items[i].prefix) - 1);
-  s_items[i].prefix[sizeof(s_items[i].prefix) - 1] = '\0';
-  strncpy(s_items[i].text, text, sizeof(s_items[i].text) - 1);
-  s_items[i].text[sizeof(s_items[i].text) - 1] = '\0';
+static void prv_persist_item(int i) {
+  persist_write_data(PERSIST_KEY_ITEM_BASE + i, &s_items[i], sizeof(InfoItem));
 }
 
-static void prv_load_dummy_items(void) {
+static void prv_persist_item_count(void) {
+  persist_write_int(PERSIST_KEY_ITEM_COUNT, s_item_count);
+}
+
+// Loads the last-cached item list from persistent storage, so the watchface
+// shows real (if possibly stale) data immediately on launch rather than
+// waiting for the phone. No cache yet (fresh install) or an empty cached
+// list both leave s_item_count at 0, which prv_info_update_proc renders as
+// "Nothing to see".
+static void prv_load_cached_items(void) {
   s_item_count = 0;
-  prv_set_item(s_item_count++, ITEM_TYPE_EVENT, "Mon 09:00", "Standup");
-  prv_set_item(s_item_count++, ITEM_TYPE_EVENT, "Mon 12:30", "Lunch w/ Sam");
-  prv_set_item(s_item_count++, ITEM_TYPE_DIVIDER, "", "");
-  prv_set_item(s_item_count++, ITEM_TYPE_EVENT, "Tue 15:00", "1:1");
-  prv_set_item(s_item_count++, ITEM_TYPE_EVENT, "Tue 18:30", "Gym");
+  if (!persist_exists(PERSIST_KEY_ITEM_COUNT)) {
+    return;
+  }
+
+  int count = persist_read_int(PERSIST_KEY_ITEM_COUNT);
+  if (count > MAX_INFO_ITEMS) {
+    count = MAX_INFO_ITEMS;
+  }
+  for (int i = 0; i < count; i++) {
+    persist_read_data(PERSIST_KEY_ITEM_BASE + i, &s_items[i], sizeof(InfoItem));
+  }
+  s_item_count = count;
 }
 
 // AppMessage inbox: see PROTOCOL.md for the full contract. Messages arrive
@@ -130,6 +151,7 @@ static void prv_inbox_received_handler(DictionaryIterator *iterator, void *conte
       count = MAX_INFO_ITEMS;
     }
     s_item_count = count;
+    prv_persist_item_count();
     layer_mark_dirty(s_info_layer);
     return;
   }
@@ -167,7 +189,9 @@ static void prv_inbox_received_handler(DictionaryIterator *iterator, void *conte
 
   if (index + 1 > s_item_count) {
     s_item_count = index + 1;
+    prv_persist_item_count();
   }
+  prv_persist_item(index);
   layer_mark_dirty(s_info_layer);
 }
 
@@ -184,6 +208,14 @@ static void prv_info_update_proc(Layer *layer, GContext *ctx) {
 
   GFont prefix_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
   GFont text_font = fonts_get_system_font(FONT_KEY_GOTHIC_18);
+
+  if (s_item_count == 0) {
+    GRect empty_rect = GRect(4, 6, bounds.size.w - 8, ROW_HEIGHT);
+    graphics_context_set_text_color(ctx, GColorLightGray);
+    graphics_draw_text(ctx, "Nothing to see", text_font, empty_rect,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    return;
+  }
 
   int y = 6;
   for (int i = 0; i < s_item_count; i++) {
@@ -491,7 +523,7 @@ static void prv_window_unload(Window *window) {
 }
 
 static void prv_init(void) {
-  prv_load_dummy_items();
+  prv_load_cached_items();
 
   if (persist_exists(PERSIST_KEY_SHOW_BATTERY)) {
     s_show_battery = persist_read_bool(PERSIST_KEY_SHOW_BATTERY);
