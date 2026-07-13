@@ -46,9 +46,70 @@ static char s_date_buf[24];
 // MAX_INFO_ITEMS * sizeof(InfoItem).
 #define PERSIST_KEY_ITEM_COUNT 4
 #define PERSIST_KEY_ITEM_BASE 10
+// Tap-gesture tuning (see PROTOCOL.md): kept well clear of PERSIST_KEY_ITEM_BASE's
+// range so raising MAX_INFO_ITEMS later can't collide with these.
+#define PERSIST_KEY_TAP_AXIS_X 20
+#define PERSIST_KEY_TAP_AXIS_Y 21
+#define PERSIST_KEY_TAP_AXIS_Z 22
+#define PERSIST_KEY_TAP_THRESHOLD_MG 23
+#define PERSIST_KEY_TAP_RINGDOWN_MS 24
+#define PERSIST_KEY_TAP_MULTI_TAP_WINDOW_MS 25
+#define PERSIST_KEY_ENABLE_PAGINATION 26
 static bool s_show_battery = true;
 static bool s_show_quiet_time = true;
 static bool s_show_bluetooth_alert = true;
+
+// Master switch for the whole pagination feature (info-feed paging + the
+// triple-tap gesture that drives it). Off by default: the info feed just
+// shows as many events as fit on one screen, same as before pagination
+// existed, and the accelerometer isn't even subscribed to (see prv_init()/
+// prv_inbox_received_handler(), which subscribe/unsubscribe on transitions
+// of this flag -- no point sampling the accelerometer for a gesture that
+// can't do anything).
+static bool s_enable_pagination = false;
+
+// Tap-recognition parameters, tunable at runtime from the Clay settings page
+// (see PROTOCOL.md) so they can be tweaked without recompiling. See
+// prv_accel_data_handler (below, with the rest of the tap-gesture code) for
+// how these are actually used; they live up here, alongside the other Clay
+// settings, only because the AppMessage inbox handler needs to write them.
+// Defaults match the values this feature originally shipped with as fixed
+// constants, and are used until a Clay save (or a persisted prior save)
+// overrides them.
+#define ACCEL_TAP_SAMPLING_RATE ACCEL_SAMPLING_25HZ
+#define ACCEL_TAP_SAMPLES_PER_UPDATE 4
+#define ACCEL_TAP_DEFAULT_THRESHOLD_MG 300
+#define ACCEL_TAP_DEFAULT_RINGDOWN_MS 160
+#define ACCEL_TAP_DEFAULT_MULTI_TAP_WINDOW_MS 400
+
+// Which accelerometer axes contribute to the jolt magnitude. A disabled
+// axis's delta is treated as 0, so motion on that axis alone can't
+// register a tap. (If all three are disabled, no jolt can ever exceed the
+// threshold and taps stop working entirely -- allowed, not guarded
+// against, since this is a debugging/tuning control.)
+static bool s_tap_axis_x = true;
+static bool s_tap_axis_y = true;
+static bool s_tap_axis_z = true;
+
+// Jolt magnitude (milli-Gs) and gesture timings (ms), as configured.
+static int32_t s_tap_threshold_mg = ACCEL_TAP_DEFAULT_THRESHOLD_MG;
+static int32_t s_tap_ringdown_ms = ACCEL_TAP_DEFAULT_RINGDOWN_MS;
+static int32_t s_tap_multi_tap_window_ms = ACCEL_TAP_DEFAULT_MULTI_TAP_WINDOW_MS;
+
+// Derived from the above (squared threshold; ms converted to samples at
+// ACCEL_TAP_SAMPLING_RATE, defined with the rest of the tap-gesture code
+// below) so prv_accel_data_handler can compare plain ints per sample
+// instead of redoing this math every time. Recomputed on load and whenever
+// a setting changes.
+static int32_t s_tap_threshold_sq;
+static int s_tap_ringdown_samples;
+static int s_tap_multi_tap_window_samples;
+
+static void prv_recompute_tap_params(void) {
+  s_tap_threshold_sq = s_tap_threshold_mg * s_tap_threshold_mg;
+  s_tap_ringdown_samples = (s_tap_ringdown_ms * ACCEL_TAP_SAMPLING_RATE) / 1000;
+  s_tap_multi_tap_window_samples = (s_tap_multi_tap_window_ms * ACCEL_TAP_SAMPLING_RATE) / 1000;
+}
 
 // Last-seen phone connection state, so the disconnect alert only fires on a
 // real connected -> disconnected transition (not when the handler is primed
@@ -74,8 +135,16 @@ typedef struct {
 static InfoItem s_items[MAX_INFO_ITEMS];
 static int s_item_count = 0;
 
+// Current page of the info feed (0-based). Any accelerometer tap advances to
+// the next page, wrapping back to 0 after the last one.
+static int s_page = 0;
+
 static const int ROW_HEIGHT = 22;
 static const int DIVIDER_ROW_HEIGHT = 12;
+// Reserved strip at the bottom of the info layer for the page-dot indicator,
+// only actually consumed (i.e. subtracted from the pagination height) when
+// there's more than one page.
+static const int PAGE_INDICATOR_H = 10;
 
 static void prv_persist_item(int i) {
   persist_write_data(PERSIST_KEY_ITEM_BASE + i, &s_items[i], sizeof(InfoItem));
@@ -106,9 +175,16 @@ static void prv_load_cached_items(void) {
   s_item_count = count;
 }
 
+// Defined further down, after prv_accel_data_handler (which they reference).
+// Forward declared here because prv_inbox_received_handler and prv_init need
+// to subscribe/unsubscribe the accelerometer on EnablePagination transitions.
+static void prv_subscribe_accel(void);
+static void prv_unsubscribe_accel(void);
+
 // AppMessage inbox: see PROTOCOL.md for the full contract. Messages arrive
 // in one of these shapes:
-//   - {ShowBattery: 0|1, ShowQuietTime: 0|1, ShowBluetooth: 0|1,
+//   - {ShowBattery: 0|1, ShowQuietTime: 0|1, ShowBluetooth: 0|1, EnablePagination: 0|1,
+//      TapAxisX/Y/Z: 0|1, TapThresholdMg/TapRingdownMs/TapMultiTapWindowMs: N,
 //      ServerUrl: "..."} (any subset) -- from the Clay settings page, all
 //      changed fields in one message
 //   - {ItemCount: N}                                  -- resets the list
@@ -140,7 +216,71 @@ static void prv_inbox_received_handler(DictionaryIterator *iterator, void *conte
     handled_setting = true;
   }
 
+  Tuple *enable_pagination_tuple = dict_find(iterator, MESSAGE_KEY_EnablePagination);
+  if (enable_pagination_tuple) {
+    bool new_value = enable_pagination_tuple->value->uint8 != 0;
+    if (new_value != s_enable_pagination) {
+      s_enable_pagination = new_value;
+      persist_write_bool(PERSIST_KEY_ENABLE_PAGINATION, s_enable_pagination);
+      if (s_enable_pagination) {
+        prv_subscribe_accel();
+      } else {
+        prv_unsubscribe_accel();
+        s_page = 0;
+      }
+      layer_mark_dirty(s_info_layer);
+    }
+    handled_setting = true;
+  }
+
+  Tuple *tap_axis_x_tuple = dict_find(iterator, MESSAGE_KEY_TapAxisX);
+  if (tap_axis_x_tuple) {
+    s_tap_axis_x = tap_axis_x_tuple->value->uint8 != 0;
+    persist_write_bool(PERSIST_KEY_TAP_AXIS_X, s_tap_axis_x);
+    handled_setting = true;
+  }
+
+  Tuple *tap_axis_y_tuple = dict_find(iterator, MESSAGE_KEY_TapAxisY);
+  if (tap_axis_y_tuple) {
+    s_tap_axis_y = tap_axis_y_tuple->value->uint8 != 0;
+    persist_write_bool(PERSIST_KEY_TAP_AXIS_Y, s_tap_axis_y);
+    handled_setting = true;
+  }
+
+  Tuple *tap_axis_z_tuple = dict_find(iterator, MESSAGE_KEY_TapAxisZ);
+  if (tap_axis_z_tuple) {
+    s_tap_axis_z = tap_axis_z_tuple->value->uint8 != 0;
+    persist_write_bool(PERSIST_KEY_TAP_AXIS_Z, s_tap_axis_z);
+    handled_setting = true;
+  }
+
+  // Clay's "slider" component sends a real number (unlike "input", which
+  // sends a string) -- PebbleKit JS encodes it as a signed 32-bit int, so
+  // these must be read via ->value->int32, not ->value->uint8 (which would
+  // silently truncate anything over 255, unlike the small 0/1 toggles above).
+  Tuple *tap_threshold_tuple = dict_find(iterator, MESSAGE_KEY_TapThresholdMg);
+  if (tap_threshold_tuple) {
+    s_tap_threshold_mg = tap_threshold_tuple->value->int32;
+    persist_write_int(PERSIST_KEY_TAP_THRESHOLD_MG, s_tap_threshold_mg);
+    handled_setting = true;
+  }
+
+  Tuple *tap_ringdown_tuple = dict_find(iterator, MESSAGE_KEY_TapRingdownMs);
+  if (tap_ringdown_tuple) {
+    s_tap_ringdown_ms = tap_ringdown_tuple->value->int32;
+    persist_write_int(PERSIST_KEY_TAP_RINGDOWN_MS, s_tap_ringdown_ms);
+    handled_setting = true;
+  }
+
+  Tuple *tap_window_tuple = dict_find(iterator, MESSAGE_KEY_TapMultiTapWindowMs);
+  if (tap_window_tuple) {
+    s_tap_multi_tap_window_ms = tap_window_tuple->value->int32;
+    persist_write_int(PERSIST_KEY_TAP_MULTI_TAP_WINDOW_MS, s_tap_multi_tap_window_ms);
+    handled_setting = true;
+  }
+
   if (handled_setting) {
+    prv_recompute_tap_params();
     return;
   }
 
@@ -199,6 +339,115 @@ static void prv_inbox_dropped_handler(AppMessageResult reason, void *context) {
   APP_LOG(APP_LOG_LEVEL_ERROR, "AppMessage inbox dropped, reason: %d", (int)reason);
 }
 
+// --- Pagination -------------------------------------------------------
+// The info feed fills a page with as many rows as fit in `height`, then
+// spills the rest onto the next page. These helpers share the exact same
+// row-height rules as the draw loop below so a page's contents always match
+// what was measured.
+
+// Index of the first item that does NOT fit on a page starting at `start`
+// within `height` pixels. Always admits at least one item (even if it alone
+// overflows `height`) so an oversized row can't stall pagination.
+static int prv_page_end(int start, int height) {
+  int y = 6;
+  int i = start;
+  while (i < s_item_count) {
+    int row_h = (s_items[i].type == ITEM_TYPE_DIVIDER) ? DIVIDER_ROW_HEIGHT : ROW_HEIGHT;
+    if (i > start && y + row_h > height) {
+      break;
+    }
+    y += row_h;
+    i++;
+  }
+  return i;
+}
+
+static int prv_num_pages(int height) {
+  if (s_item_count == 0) {
+    return 1;
+  }
+  int pages = 0;
+  int start = 0;
+  while (start < s_item_count) {
+    start = prv_page_end(start, height);
+    pages++;
+  }
+  return pages;
+}
+
+static int prv_page_start(int page, int height) {
+  int start = 0;
+  for (int p = 0; p < page && start < s_item_count; p++) {
+    start = prv_page_end(start, height);
+  }
+  return start;
+}
+
+// Shared by the draw proc and the tap handler so both agree on how many
+// pages there are: reserve the indicator strip only if the items actually
+// need more than one page at the full layer height, otherwise let rows use
+// the whole layer (and there's exactly one page).
+static int prv_layout_num_pages(int full_height, int *out_content_h) {
+  int content_h = full_height;
+  int num_pages = prv_num_pages(content_h);
+  if (num_pages > 1) {
+    content_h = full_height - PAGE_INDICATOR_H;
+    num_pages = prv_num_pages(content_h);
+  }
+  if (out_content_h) {
+    *out_content_h = content_h;
+  }
+  return num_pages;
+}
+
+static void prv_draw_page_indicator(GContext *ctx, GRect slot, int num_pages, int page) {
+  const int dot_r = 2;
+  const int dot_gap = 8;
+  int total_w = (num_pages - 1) * dot_gap;
+  int x = slot.origin.x + (slot.size.w - total_w) / 2;
+  int cy = slot.origin.y + slot.size.h / 2;
+
+  for (int p = 0; p < num_pages; p++) {
+    GColor color = (p == page) ? GColorWhite : GColorDarkGray;
+    graphics_context_set_fill_color(ctx, color);
+    graphics_fill_circle(ctx, GPoint(x + p * dot_gap, cy), dot_r);
+  }
+}
+
+// Draws items[start, end) top-anchored at y=6, at the given width. Shared by
+// both the paginated and non-paginated rendering paths in
+// prv_info_update_proc so they can't drift apart.
+static void prv_draw_rows(GContext *ctx, GFont prefix_font, GFont text_font, int width,
+                           int start, int end) {
+  int y = 6;
+  for (int i = start; i < end; i++) {
+    bool is_divider = s_items[i].type == ITEM_TYPE_DIVIDER;
+    int row_h = is_divider ? DIVIDER_ROW_HEIGHT : ROW_HEIGHT;
+
+    if (is_divider) {
+      int line_y = y + row_h / 2;
+      graphics_context_set_stroke_color(ctx, GColorLightGray);
+      graphics_context_set_stroke_width(ctx, 1);
+      graphics_draw_line(ctx, GPoint(4, line_y), GPoint(width - 4, line_y));
+      y += row_h;
+      continue;
+    }
+
+    GRect prefix_rect = GRect(4, y, 70, row_h);
+    GRect text_rect = GRect(76, y, width - 80, row_h);
+
+    graphics_context_set_text_color(ctx, PBL_IF_COLOR_ELSE(GColorVividCerulean, GColorWhite));
+    graphics_draw_text(ctx, s_items[i].prefix, prefix_font, prefix_rect,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+
+    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_draw_text(ctx, s_items[i].text, text_font, text_rect,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+
+    y += row_h;
+  }
+}
+
 static void prv_info_update_proc(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
 
@@ -217,38 +466,147 @@ static void prv_info_update_proc(Layer *layer, GContext *ctx) {
     return;
   }
 
-  int y = 6;
-  for (int i = 0; i < s_item_count; i++) {
-    bool is_divider = s_items[i].type == ITEM_TYPE_DIVIDER;
-    int row_h = is_divider ? DIVIDER_ROW_HEIGHT : ROW_HEIGHT;
-    if (y + row_h > bounds.size.h) {
-      // Doesn't fit in the visible area; later this becomes a scroll offset
-      // rather than a hard stop.
-      break;
-    }
+  if (!s_enable_pagination) {
+    // Pagination off: just fill the whole layer with as many items as fit,
+    // same as before the pagination feature existed. No page indicator, no
+    // reserved strip, and s_page is never consulted.
+    int end = prv_page_end(0, bounds.size.h);
+    prv_draw_rows(ctx, prefix_font, text_font, bounds.size.w, 0, end);
+    return;
+  }
 
-    if (is_divider) {
-      int line_y = y + row_h / 2;
-      graphics_context_set_stroke_color(ctx, GColorLightGray);
-      graphics_context_set_stroke_width(ctx, 1);
-      graphics_draw_line(ctx, GPoint(4, line_y), GPoint(bounds.size.w - 4, line_y));
-      y += row_h;
+  int content_h;
+  int num_pages = prv_layout_num_pages(bounds.size.h, &content_h);
+  if (s_page >= num_pages) {
+    s_page = 0;
+  }
+
+  int start = prv_page_start(s_page, content_h);
+  int end = prv_page_end(start, content_h);
+  prv_draw_rows(ctx, prefix_font, text_font, bounds.size.w, start, end);
+
+  if (num_pages > 1) {
+    GRect indicator_slot = GRect(0, bounds.size.h - PAGE_INDICATOR_H, bounds.size.w, PAGE_INDICATOR_H);
+    prv_draw_page_indicator(ctx, indicator_slot, num_pages, s_page);
+  }
+}
+
+// --- Page-advance gesture -----------------------------------------------
+// A wrist tap is used (rather than touch or buttons) because watchfaces get
+// neither: touch is reserved for watchapps, and the system shell owns all
+// four buttons while a watchface is on screen.
+//
+// This deliberately does NOT use accel_tap_service_subscribe(): that service
+// is fed by the system's shake-detection subsystem, whose threshold is only
+// adjustable via the shared "Motion Sensitivity" setting (Settings > System),
+// not from app code -- and at its default it took a fairly hard knock to
+// register. Sampling raw accelerometer data instead lets this watchface pick
+// its own, more sensitive, threshold without touching that global setting.
+//
+// The tunable parameters themselves (axis mask, threshold, ringdown, and
+// multi-tap window) plus ACCEL_TAP_SAMPLING_RATE/ACCEL_TAP_SAMPLES_PER_UPDATE
+// are declared up near the other Clay settings, not here, since the
+// AppMessage inbox handler needs to write them -- see prv_recompute_tap_params()
+// for how the ms-based settings become the sample counts used below.
+//
+// Only a TRIPLE tap turns the page -- a single tap or a double tap is
+// deliberately ignored. A tap sequence starts on the first jolt and stays
+// open, extending its wait window on every further jolt, until the window
+// elapses with no new jolt; the sequence's final tap count then decides
+// whether to act (exactly 3) or discard (anything else, including 1, 2, or
+// 4+).
+#define ACCEL_TAP_TARGET_COUNT 3
+
+static bool s_accel_have_prev = false;
+static int16_t s_accel_prev_x, s_accel_prev_y, s_accel_prev_z;
+static int s_accel_ringdown = 0;
+static bool s_accel_tap_pending = false;
+static int s_accel_tap_count = 0;
+static int s_accel_pending_countdown = 0;
+
+static void prv_advance_page(void) {
+  int num_pages = prv_layout_num_pages(layer_get_bounds(s_info_layer).size.h, NULL);
+  s_page = (s_page + 1) % num_pages;
+  layer_mark_dirty(s_info_layer);
+}
+
+// accel_data_service_subscribe() callback: scans each new batch of raw
+// samples for sudden jolts (large sample-to-sample deltas) and counts them
+// into taps. The page only turns when a sequence's final count is exactly
+// ACCEL_TAP_TARGET_COUNT (3) -- see the block comment above.
+static void prv_accel_data_handler(AccelData *data, uint32_t num_samples) {
+  for (uint32_t i = 0; i < num_samples; i++) {
+    if (data[i].did_vibrate) {
+      // Our own vibration motor would otherwise look like a huge jolt.
+      s_accel_have_prev = false;
       continue;
     }
 
-    GRect prefix_rect = GRect(4, y, 70, row_h);
-    GRect text_rect = GRect(76, y, bounds.size.w - 80, row_h);
+    if (s_accel_ringdown > 0) {
+      s_accel_ringdown--;
+    }
 
-    graphics_context_set_text_color(ctx, PBL_IF_COLOR_ELSE(GColorVividCerulean, GColorWhite));
-    graphics_draw_text(ctx, s_items[i].prefix, prefix_font, prefix_rect,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    bool jolt = false;
+    if (s_accel_have_prev) {
+      int32_t dx = s_tap_axis_x ? (int32_t)(data[i].x - s_accel_prev_x) : 0;
+      int32_t dy = s_tap_axis_y ? (int32_t)(data[i].y - s_accel_prev_y) : 0;
+      int32_t dz = s_tap_axis_z ? (int32_t)(data[i].z - s_accel_prev_z) : 0;
+      int32_t delta_sq = dx * dx + dy * dy + dz * dz;
+      jolt = delta_sq > s_tap_threshold_sq && s_accel_ringdown == 0;
+    }
 
-    graphics_context_set_text_color(ctx, GColorWhite);
-    graphics_draw_text(ctx, s_items[i].text, text_font, text_rect,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    if (jolt) {
+      s_accel_ringdown = s_tap_ringdown_samples;
+      if (s_accel_tap_pending) {
+        // Another tap arrived within the window -- extend the sequence.
+        s_accel_tap_count++;
+      } else {
+        // First tap of a new sequence.
+        s_accel_tap_pending = true;
+        s_accel_tap_count = 1;
+      }
+      // Reset the wait window after every tap, not just the first, so each
+      // tap in the sequence gets its own full window to be followed by the
+      // next one.
+      s_accel_pending_countdown = s_tap_multi_tap_window_samples;
+    } else if (s_accel_tap_pending) {
+      if (s_accel_pending_countdown > 0) {
+        s_accel_pending_countdown--;
+      } else {
+        // No further tap arrived in time -- the sequence is finished.
+        if (s_accel_tap_count == ACCEL_TAP_TARGET_COUNT) {
+          prv_advance_page();
+        }
+        s_accel_tap_pending = false;
+        s_accel_tap_count = 0;
+      }
+    }
 
-    y += row_h;
+    s_accel_prev_x = data[i].x;
+    s_accel_prev_y = data[i].y;
+    s_accel_prev_z = data[i].z;
+    s_accel_have_prev = true;
   }
+}
+
+// Subscribes to raw accelerometer data for tap detection, resetting any
+// leftover detection state first (stale samples/pending taps from before a
+// gap in subscription -- e.g. pagination having been off for a while --
+// shouldn't bleed into freshly-resumed detection). Called from prv_init()
+// (if EnablePagination starts enabled) and from prv_inbox_received_handler()
+// on an EnablePagination off->on transition.
+static void prv_subscribe_accel(void) {
+  s_accel_have_prev = false;
+  s_accel_ringdown = 0;
+  s_accel_tap_pending = false;
+  s_accel_tap_count = 0;
+  s_accel_pending_countdown = 0;
+  accel_service_set_sampling_rate(ACCEL_TAP_SAMPLING_RATE);
+  accel_data_service_subscribe(ACCEL_TAP_SAMPLES_PER_UPDATE, prv_accel_data_handler);
+}
+
+static void prv_unsubscribe_accel(void) {
+  accel_data_service_unsubscribe();
 }
 
 // Battery icon: outline + a fill bar proportional to charge, red when
@@ -534,6 +892,28 @@ static void prv_init(void) {
   if (persist_exists(PERSIST_KEY_SHOW_BLUETOOTH)) {
     s_show_bluetooth_alert = persist_read_bool(PERSIST_KEY_SHOW_BLUETOOTH);
   }
+  if (persist_exists(PERSIST_KEY_TAP_AXIS_X)) {
+    s_tap_axis_x = persist_read_bool(PERSIST_KEY_TAP_AXIS_X);
+  }
+  if (persist_exists(PERSIST_KEY_TAP_AXIS_Y)) {
+    s_tap_axis_y = persist_read_bool(PERSIST_KEY_TAP_AXIS_Y);
+  }
+  if (persist_exists(PERSIST_KEY_TAP_AXIS_Z)) {
+    s_tap_axis_z = persist_read_bool(PERSIST_KEY_TAP_AXIS_Z);
+  }
+  if (persist_exists(PERSIST_KEY_TAP_THRESHOLD_MG)) {
+    s_tap_threshold_mg = persist_read_int(PERSIST_KEY_TAP_THRESHOLD_MG);
+  }
+  if (persist_exists(PERSIST_KEY_TAP_RINGDOWN_MS)) {
+    s_tap_ringdown_ms = persist_read_int(PERSIST_KEY_TAP_RINGDOWN_MS);
+  }
+  if (persist_exists(PERSIST_KEY_TAP_MULTI_TAP_WINDOW_MS)) {
+    s_tap_multi_tap_window_ms = persist_read_int(PERSIST_KEY_TAP_MULTI_TAP_WINDOW_MS);
+  }
+  if (persist_exists(PERSIST_KEY_ENABLE_PAGINATION)) {
+    s_enable_pagination = persist_read_bool(PERSIST_KEY_ENABLE_PAGINATION);
+  }
+  prv_recompute_tap_params();
 
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
@@ -560,9 +940,21 @@ static void prv_init(void) {
 
   tick_timer_service_subscribe(MINUTE_UNIT, prv_tick_handler);
   prv_update_time();
+
+  // Watchfaces get no touch or button input; a wrist tap is the only
+  // gesture available, so it drives info-feed pagination. See the comment
+  // above prv_accel_data_handler for why this samples raw data instead of
+  // using accel_tap_service_subscribe(). Only subscribed at all if
+  // pagination is enabled -- see s_enable_pagination's comment.
+  if (s_enable_pagination) {
+    prv_subscribe_accel();
+  }
 }
 
 static void prv_deinit(void) {
+  if (s_enable_pagination) {
+    prv_unsubscribe_accel();
+  }
   battery_state_service_unsubscribe();
   connection_service_unsubscribe();
   tick_timer_service_unsubscribe();

@@ -31,7 +31,14 @@
       "ShowQuietTime",
       "ShowBluetooth",
       "ServerUrl",
-      "ItemType"
+      "ItemType",
+      "TapAxisX",
+      "TapAxisY",
+      "TapAxisZ",
+      "TapThresholdMg",
+      "TapRingdownMs",
+      "TapMultiTapWindowMs",
+      "EnablePagination"
     ],
     "resources": {
       "media": []

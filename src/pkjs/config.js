@@ -38,6 +38,76 @@ module.exports = [
     "defaultValue": true
   },
   {
+    "type": "heading",
+    "defaultValue": "Info Feed Pagination"
+  },
+  {
+    "type": "toggle",
+    "messageKey": "EnablePagination",
+    "label": "Enable Pagination",
+    "description": "Off by default: the info feed shows only as many events as fit on one screen. Turn on to spill extra events onto additional pages, turned with the triple-tap gesture below.",
+    "defaultValue": false
+  },
+  {
+    "type": "heading",
+    "defaultValue": "Page-Turn Tap Gesture"
+  },
+  {
+    "type": "text",
+    "defaultValue": "Only relevant when Enable Pagination (above) is on. A TRIPLE tap on the watch turns the info-feed page -- single and double taps are ignored. These controls tune how taps are detected -- see PROTOCOL.md for the full explanation of each one."
+  },
+  {
+    "type": "toggle",
+    "messageKey": "TapAxisX",
+    "label": "Use X Axis",
+    "description": "Include left/right motion when checking for a tap.",
+    "defaultValue": true
+  },
+  {
+    "type": "toggle",
+    "messageKey": "TapAxisY",
+    "label": "Use Y Axis",
+    "description": "Include up/down motion when checking for a tap.",
+    "defaultValue": true
+  },
+  {
+    "type": "toggle",
+    "messageKey": "TapAxisZ",
+    "label": "Use Z Axis",
+    "description": "Include forward/backward (face-normal) motion when checking for a tap.",
+    "defaultValue": true
+  },
+  {
+    "type": "slider",
+    "messageKey": "TapThresholdMg",
+    "label": "Tap Sensitivity Threshold (mG)",
+    "description": "Minimum sudden movement, in milli-Gs, to register as a tap. Lower = more sensitive.",
+    "min": 50,
+    "max": 1500,
+    "step": 10,
+    "defaultValue": 300
+  },
+  {
+    "type": "slider",
+    "messageKey": "TapRingdownMs",
+    "label": "Tap Ringdown (ms)",
+    "description": "Minimum gap between two jolts for them to count as separate taps, so one knock's mechanical wobble isn't counted twice.",
+    "min": 0,
+    "max": 1000,
+    "step": 20,
+    "defaultValue": 160
+  },
+  {
+    "type": "slider",
+    "messageKey": "TapMultiTapWindowMs",
+    "label": "Multi-Tap Window (ms)",
+    "description": "How long to wait after each tap for the next one. The page turns only if exactly three taps land within this window of each other -- any other count (1, 2, 4+) is ignored.",
+    "min": 0,
+    "max": 1500,
+    "step": 20,
+    "defaultValue": 400
+  },
+  {
     "type": "submit",
     "defaultValue": "Save"
   }

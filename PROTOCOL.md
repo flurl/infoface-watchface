@@ -91,7 +91,7 @@ Keys are declared by name in the watchface's `package.json` → `pebble.messageK
 Pebble build tool (`waf`) assigns each one a `uint32` at build time, in declaration order,
 starting at 10000.
 
-Current build (`build/js/message_keys.json` on the VM, 2026-07-12):
+Current build (`build/js/message_keys.json` on the VM, 2026-07-13):
 
 | Key name        | Numeric ID | Pebble type | Constraint                          |
 |-----------------|-----------:|-------------|--------------------------------------|
@@ -104,6 +104,13 @@ Current build (`build/js/message_keys.json` on the VM, 2026-07-12):
 | `ShowBluetooth` | `10006`    | UInt8       | `0` or `1` (see below)               |
 | `ServerUrl`     | `10007`    | cstring     | PKJS-only, see below — C ignores it  |
 | `ItemType`      | `10008`    | UInt8       | `0`=divider, `1`=event, `255`=other  |
+| `TapAxisX`      | `10009`    | UInt8       | `0` or `1` (see "Page-turn tap gesture" below) |
+| `TapAxisY`      | `10010`    | UInt8       | `0` or `1`                           |
+| `TapAxisZ`      | `10011`    | UInt8       | `0` or `1`                           |
+| `TapThresholdMg`| `10012`    | **Int32**   | milli-Gs, Clay `slider` component    |
+| `TapRingdownMs` | `10013`    | **Int32**   | milliseconds, Clay `slider` component |
+| `TapMultiTapWindowMs` | `10014` | **Int32** | milliseconds, Clay `slider` component |
+| `EnablePagination` | `10015` | UInt8 | `0` or `1`, default `0` (see "Page-turn tap gesture" below) |
 
 `MAX_INFO_ITEMS = 8` (watchface-side buffer cap, `src/c/info-watchface.c`).
 
@@ -151,6 +158,71 @@ sends the settings dict over the **same** `AppMessage` inbox as calendar sync �
   never reads it. PKJS itself reads the live value straight out of Clay's
   `localStorage['clay-settings']` (`getServerUrl()`), not from AppMessage — see
   "PebbleKit JS" above.
+
+### Page-turn tap gesture
+
+Pagination itself is off by default — see **`EnablePagination`** below — and everything in this
+section only matters while it's on.
+
+The watchface has no touch or button input (touch is reserved for watchapps; the system shell
+owns all buttons on a watchface — see `src/c/info-watchface.c`'s comment above
+`prv_accel_data_handler`), so the info feed's page turns are driven by a hand-rolled
+accelerometer jolt detector (`accel_data_service_subscribe()`, **not**
+`accel_tap_service_subscribe()` — the latter is fed by the system's shared "Motion Sensitivity"
+setting, not independently tunable from app code). Only a **triple** tap turns the page — a
+single tap or a double tap is deliberately ignored. A tap sequence starts on the first jolt and
+stays open, extending its wait window on every further jolt, until the window elapses with no
+new jolt; the sequence's final tap count then decides whether to act (exactly 3) or discard
+(anything else, including 1, 2, or 4+). All of the detector's parameters are exposed as Clay
+settings so they can be tuned from the phone without recompiling:
+
+- **`EnablePagination`** (`0`/`1`, default `0`): master switch for the whole feature. **Off**
+  (the default): the info feed shows only as many events as fit on one screen — same
+  hard-truncation behavior as before pagination existed — with no page indicator, and the
+  accelerometer is not even subscribed to (`prv_unsubscribe_accel()`/never subscribed in
+  `prv_init()`), so there's no extra battery draw for a gesture that couldn't do anything
+  anyway. **On:** extra events spill onto additional pages, turned by the triple-tap gesture
+  below; the watchface subscribes to `accel_data_service` live on the transition (no reinstall
+  needed) via `prv_subscribe_accel()`, which also resets any leftover tap-detection state so a
+  stale in-progress sequence from before a gap in subscription can't bleed through. Toggling
+  **off** immediately resets `s_page` to `0` and unsubscribes. Persisted under
+  `PERSIST_KEY_ENABLE_PAGINATION` (`26`).
+- **`TapAxisX`/`TapAxisY`/`TapAxisZ`** (`0`/`1`, default `1` — all three enabled): which
+  accelerometer axes contribute to the jolt magnitude. A disabled axis's sample-to-sample delta
+  is treated as `0`, so motion on that axis alone can never register a tap. Persisted under
+  `PERSIST_KEY_TAP_AXIS_X/Y/Z` (`20`/`21`/`22`).
+- **`TapThresholdMg`** (milli-Gs, default `300`): the sample-to-sample jolt magnitude that
+  counts as a tap. Lower = more sensitive. The watch squares it once (`s_tap_threshold_sq`) and
+  compares against the squared per-axis delta sum every sample, avoiding a `sqrt()` per sample.
+  Persisted under `PERSIST_KEY_TAP_THRESHOLD_MG` (`23`).
+- **`TapRingdownMs`** (milliseconds, default `160`): minimum gap between two raw jolts for them
+  to count as separate taps, so one physical knock's mechanical ringing isn't itself counted as
+  a second tap. Converted to a sample count (`s_tap_ringdown_samples`) via the fixed 25Hz
+  accelerometer sampling rate. Persisted under `PERSIST_KEY_TAP_RINGDOWN_MS` (`24`).
+- **`TapMultiTapWindowMs`** (milliseconds, default `400`): how long after each jolt to wait for
+  the next one before finishing the sequence. Reset on every jolt, not just the first, so each
+  tap in a triple gets its own full window to be followed by the next. Must stay comfortably
+  above `TapRingdownMs` or a deliberate next tap could be swallowed by the ringdown debounce
+  instead of being recognized. Persisted under `PERSIST_KEY_TAP_MULTI_TAP_WINDOW_MS` (`25`).
+
+All seven are read/written in `prv_inbox_received_handler()`/`prv_init()` alongside the other Clay
+settings (same "any subset, independent `if` per key" pattern — see "Inbox handler contract"
+below); the three numeric fields are recomputed into their derived sample-count form by
+`prv_recompute_tap_params()` on load and on every settings save that touches one of them.
+
+**Clay component gotcha (the reason for the Int32 column above):** the numeric fields use Clay's
+`"slider"` component, not `"input"`. Clay's `"input"` manipulator (`val`) returns the raw HTML
+value as a **string**, which fails `prepareForAppMessage()`'s `typeof value === 'number'` check
+and gets sent as a `cstring` tuple instead of a number — silently wrong for a value meant to be
+read as an int. `"slider"`'s manipulator does `parseFloat()`, producing a real JS number that
+Clay serializes as a signed 32-bit int. The three toggles (`TapAxisX/Y/Z`) don't have this
+problem — Clay's `"toggle"` sends a boolean, which also becomes a 0/1 **Int32** on the wire, but
+since the value is always `0` or `1` it's safe to read via `->value->uint8` (matching
+`ShowBattery` etc. above) — the low byte of a small little-endian Int32 is the correct value
+regardless of the tuple's real width. **The `TapThresholdMg`/`TapRingdownMs`/
+`TapMultiTapWindowMs` fields do not have that luxury** (values run well past 255) and must be
+read via `->value->int32`, not `->value->uint8` — reading the latter would silently truncate to
+the low byte.
 
 **Inbox handler contract:** every save sends **all** changed Clay fields in a single
 `AppMessage` dict (Clay's `getSettings()` re-serializes the whole form, not just the diff).
