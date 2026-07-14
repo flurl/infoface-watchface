@@ -18,6 +18,8 @@ var clay = new Clay(clayConfig); // eslint-disable-line no-unused-vars
 
 var REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 var XHR_TIMEOUT_MS = 5000;
+var MAX_PANELS = 4;
+var MAX_ITEMS_PER_PANEL = 8;
 
 // ServerUrl is a Clay setting (see config.js) but only PKJS reads it -- the
 // watch's C code has no use for it. Clay still writes it to localStorage
@@ -31,43 +33,70 @@ function getServerUrl() {
   }
 }
 
-function sendItemAt(items, index, total) {
-  if (index >= total) {
-    console.log('pkjs: sync complete, ' + total + ' item(s)');
+// Accepts either the current (v3) {panels: [{title, items}, ...]} shape or the
+// legacy (v2) flat {items: [...]} shape -- the latter is wrapped as a single
+// untitled panel so an older/third-party server implementing just the v2
+// endpoint still works unchanged. See PROTOCOL.md "Local HTTP API".
+function normalizePanels(data) {
+  var panels = data.panels;
+  if (!panels) {
+    panels = [{ title: '', items: data.items || [] }];
+  }
+  return panels.slice(0, MAX_PANELS);
+}
+
+// Flattens panels into the ordered list of AppMessage dicts to send: one
+// PanelCount reset, then per panel one ItemCount/PanelTitle reset followed by
+// its items. Kept as a flat list (rather than nested recursion) so the single
+// sender below doesn't need to know about panel/item structure at all -- it
+// just walks the list, one message per outbox turnaround. See PROTOCOL.md
+// "Message flow".
+function buildSteps(panels) {
+  var steps = [{ 'PanelCount': panels.length }];
+  panels.forEach(function (panel, panelIndex) {
+    var items = (panel.items || []).slice(0, MAX_ITEMS_PER_PANEL);
+    steps.push({
+      'PanelIndex': panelIndex,
+      'ItemCount': items.length,
+      'PanelTitle': panel.title || ''
+    });
+    items.forEach(function (item, itemIndex) {
+      // ItemType defaults to event (1) if the source omits it, for back-compat with
+      // JSON that predates the type field. Dividers send empty prefix/text. See PROTOCOL.md.
+      var type = (typeof item.type === 'number') ? item.type : 1;
+      steps.push({
+        'PanelIndex': panelIndex,
+        'ItemIndex': itemIndex,
+        'ItemType': type,
+        'ItemPrefix': item.prefix || '',
+        'ItemText': item.text || ''
+      });
+    });
+  });
+  return steps;
+}
+
+// Sends steps[index] then, on ack, recurses to the next one -- Pebble's
+// outbox is single-buffered, so each sendAppMessage() call must await its
+// success/failure callback before the next is sent.
+function sendStepAt(steps, index) {
+  if (index >= steps.length) {
+    console.log('pkjs: sync complete, ' + steps.length + ' message(s)');
     return;
   }
-
-  var item = items[index];
-  // ItemType defaults to event (1) if the source omits it, for back-compat with
-  // JSON that predates the type field. Dividers send empty prefix/text. See PROTOCOL.md.
-  var type = (typeof item.type === 'number') ? item.type : 1;
   Pebble.sendAppMessage(
-    {
-      'ItemIndex': index,
-      'ItemType': type,
-      'ItemPrefix': item.prefix || '',
-      'ItemText': item.text || ''
-    },
+    steps[index],
     function () {
-      sendItemAt(items, index + 1, total);
+      sendStepAt(steps, index + 1);
     },
     function (e) {
-      console.log('pkjs: item ' + index + ' send failed: ' + JSON.stringify(e));
+      console.log('pkjs: step ' + index + ' send failed: ' + JSON.stringify(e));
     }
   );
 }
 
-function sendItems(items) {
-  var total = Math.min(items.length, 8);
-  Pebble.sendAppMessage(
-    { 'ItemCount': total },
-    function () {
-      sendItemAt(items, 0, total);
-    },
-    function (e) {
-      console.log('pkjs: ItemCount send failed: ' + JSON.stringify(e));
-    }
-  );
+function sendPanels(panels) {
+  sendStepAt(buildSteps(panels), 0);
 }
 
 function fetchAndSync() {
@@ -80,7 +109,7 @@ function fetchAndSync() {
     }
     try {
       var data = JSON.parse(xhr.responseText);
-      sendItems(data.items || []);
+      sendPanels(normalizePanels(data));
     } catch (e) {
       console.log('pkjs: JSON parse error: ' + e);
     }

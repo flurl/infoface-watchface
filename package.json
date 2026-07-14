@@ -38,7 +38,10 @@
       "TapThresholdMg",
       "TapRingdownMs",
       "TapMultiTapWindowMs",
-      "EnablePagination"
+      "EnablePagination",
+      "PanelCount",
+      "PanelIndex",
+      "PanelTitle"
     ],
     "resources": {
       "media": []

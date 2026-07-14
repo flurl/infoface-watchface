@@ -7,16 +7,17 @@ in the same change.
 
 - **Watchface UUID:** `8047c3ec-ee69-418d-b0f1-3da7371aee63`
 
-## Architecture (v2 — PebbleKit JS bridge)
+## Architecture (v3 — multiple info panels)
 
 ```
 companion app (Android)         PebbleKit JS (inside Pebble/Core app)      watchface (C)
 ┌─────────────────────┐         ┌──────────────────────────────────┐      ┌──────────────┐
 │ CalendarSyncService  │  HTTP   │ src/pkjs/index.js                │ App  │ AppMessage   │
 │  - reads Calendar    │◄────────│  - XHR GET /items                │Msg   │ inbox        │
-│    Provider          │  GET    │  - Pebble.sendAppMessage(...)    │─────►│ handler      │
-│  - serves JSON on    │ /items  │    (ItemCount, then N items)     │      │ (unchanged)  │
-│    127.0.0.1:47225   │         │                                  │      │              │
+│    + Weather sources │  GET    │  - Pebble.sendAppMessage(...)    │─────►│ handler      │
+│  - serves panels     │ /items  │    (PanelCount, then per panel:  │      │ (per-panel   │
+│    JSON on           │         │     ItemCount/PanelTitle, then   │      │  item store) │
+│    127.0.0.1:47225   │         │     N items)                     │      │              │
 └─────────────────────┘         └──────────────────────────────────┘      └──────────────┘
 ```
 
@@ -56,21 +57,35 @@ companion app is just the **default** source:
   (after the `READ_CALENDAR` permission is granted); stoppable via the app's UI.
 - **Endpoint:** `GET /items` → `200 OK`, `Content-Type: application/json`:
   ```json
-  {"items": [
-    {"type": 1, "prefix": "Fri 09:00", "text": "Standup"},
-    {"type": 1, "prefix": "Fri 12:30", "text": "Lunch w/ Sam"},
-    {"type": 0, "prefix": "", "text": ""},
-    {"type": 1, "prefix": "Sat 10:00", "text": "Market"}
+  {"panels": [
+    {"title": "Events", "items": [
+      {"type": 1, "prefix": "Fri 09:00", "text": "Standup"},
+      {"type": 1, "prefix": "Fri 12:30", "text": "Lunch w/ Sam"},
+      {"type": 0, "prefix": "", "text": ""},
+      {"type": 1, "prefix": "Sat 10:00", "text": "Market"}
+    ]},
+    {"title": "Weather", "items": [
+      {"type": 2, "prefix": "22°C", "text": "Sunny"}
+    ]}
   ]}
   ```
   Any other path → `404 Not Found`, `{}`.
-- Each item carries a `type` (`0`=divider, `1`=event, `255`=other; see `ItemType` above). Divider
-  items have empty `prefix`/`text` and render as a horizontal rule on the watch. `type` is optional
-  in the JSON for back-compat — PKJS and the watch both default a missing `type` to event (`1`).
-- Items are **sorted by start time ascending**, grouped by calendar day with a divider inserted
-  between day groups (never a leading divider), capped at 8 items total (dividers included), with
-  `prefix`/`text` already truncated to the byte limits below (source of truth: `CalendarReader.kt`,
-  reused from the pre-PKJS design). PKJS does not re-truncate.
+- The response is a list of **panels** (up to `MAX_PANELS = 4`, see "Info panels" below), each with an
+  optional `title` (≤15 chars, shown on the watch as the panel's header/divider label — see "Info
+  panels") and its own `items` list, independently capped at `MAX_INFO_ITEMS` (8) the same way a
+  single item list was capped in v2.
+- **Back-compat:** a server may still respond with the flat v2 shape, `{"items": [...]}` — PKJS treats
+  that as a single untitled panel. The companion app itself always emits the `panels` shape; the
+  fallback exists for any other server implementing this endpoint (see the note about the URL being
+  user-configurable, above).
+- Each item carries a `type` (`0`=divider, `1`=event, `2`=weather, `255`=other; see `ItemType` above).
+  Divider items have empty `prefix`/`text` and render as a horizontal rule on the watch. `type` is
+  optional in the JSON for back-compat — PKJS and the watch both default a missing `type` to event (`1`).
+  See "Field semantics" below for what `prefix`/`text` mean per type.
+- Within the Events panel, items are **sorted by start time ascending**, grouped by calendar day with
+  a divider inserted between day groups (never a leading divider), capped at 8 items total (dividers
+  included), with `prefix`/`text` already truncated to the byte limits below (source of truth:
+  `CalendarReader.kt`, reused from the pre-PKJS design). PKJS does not re-truncate.
 - No auth — loopback-only is the security boundary (same phone, same user).
 
 ## PebbleKit JS (watchface → watch)
@@ -83,7 +98,10 @@ manual mapping needed, unlike the old Kotlin-side integration). On any XHR failu
 (companion app not running, service stopped, wrong URL, etc.), the fetch is skipped and the
 watch keeps showing whatever it last had — no explicit "clear" on failure. Also re-fetches
 immediately on `webviewclosed` (i.e. right after the Settings screen is saved) so a changed
-`ServerUrl` takes effect without waiting for the next 15-minute cycle.
+`ServerUrl` takes effect without waiting for the next 15-minute cycle. Since v3, the fetched
+JSON is a list of panels rather than a flat item list — PKJS walks `data.panels` (or wraps a
+legacy `data.items` as one untitled panel) and sends one `PanelCount` reset followed by each
+panel's `ItemCount`/`PanelTitle` and items in turn; see "Message flow" below.
 
 ### Message keys
 
@@ -91,7 +109,7 @@ Keys are declared by name in the watchface's `package.json` → `pebble.messageK
 Pebble build tool (`waf`) assigns each one a `uint32` at build time, in declaration order,
 starting at 10000.
 
-Current build (`build/js/message_keys.json` on the VM, 2026-07-13):
+Current build (`build/js/message_keys.json` on the VM, 2026-07-14):
 
 | Key name        | Numeric ID | Pebble type | Constraint                          |
 |-----------------|-----------:|-------------|--------------------------------------|
@@ -103,7 +121,7 @@ Current build (`build/js/message_keys.json` on the VM, 2026-07-13):
 | `ShowQuietTime` | `10005`    | UInt8       | `0` or `1` (see below)               |
 | `ShowBluetooth` | `10006`    | UInt8       | `0` or `1` (see below)               |
 | `ServerUrl`     | `10007`    | cstring     | PKJS-only, see below — C ignores it  |
-| `ItemType`      | `10008`    | UInt8       | `0`=divider, `1`=event, `255`=other  |
+| `ItemType`      | `10008`    | UInt8       | `0`=divider, `1`=event, `2`=weather, `255`=other |
 | `TapAxisX`      | `10009`    | UInt8       | `0` or `1` (see "Page-turn tap gesture" below) |
 | `TapAxisY`      | `10010`    | UInt8       | `0` or `1`                           |
 | `TapAxisZ`      | `10011`    | UInt8       | `0` or `1`                           |
@@ -111,8 +129,17 @@ Current build (`build/js/message_keys.json` on the VM, 2026-07-13):
 | `TapRingdownMs` | `10013`    | **Int32**   | milliseconds, Clay `slider` component |
 | `TapMultiTapWindowMs` | `10014` | **Int32** | milliseconds, Clay `slider` component |
 | `EnablePagination` | `10015` | UInt8 | `0` or `1`, default `0` (see "Page-turn tap gesture" below) |
+| `PanelCount`    | `10016`    | UInt8       | 0–4 (see `MAX_PANELS`), master reset for the whole panel set |
+| `PanelIndex`    | `10017`    | UInt8       | 0-based, `< PanelCount`; absent ⇒ `0` (back-compat with a v2-only sender) |
+| `PanelTitle`    | `10018`    | cstring     | ≤ 15 chars + NUL (`char title[16]`); optional, empty ⇒ no header label |
 
-`MAX_INFO_ITEMS = 8` (watchface-side buffer cap, `src/c/info-watchface.c`).
+`MAX_INFO_ITEMS = 8` (per-panel buffer cap) and `MAX_PANELS = 4` (watchface-side, both in
+`src/c/info-watchface.c`).
+
+**Note on key IDs:** these are assigned by declaration order in `package.json`'s
+`pebble.messageKeys`, starting at 10000 — `PanelCount`/`PanelIndex`/`PanelTitle` were **appended**
+to the end of that list rather than inserted alongside the related `ItemCount`/`ItemIndex`/etc., so
+every existing ID stays stable. Don't reorder this list without re-checking every ID above.
 
 ## Watch settings (Clay)
 
@@ -236,28 +263,65 @@ applied because the `ShowBattery` branch returned first.)
 Round 2) only — `aplite`/`basalt`/`chalk`/`diorite` were dropped from
 `package.json`'s `targetPlatforms` since those are the three watches actually in use.
 
+### Info panels
+
+The bottom half of the watchface can hold up to **`MAX_PANELS = 4`** independent info panels — each
+one a self-contained item list from its own source (calendar events, weather, ...), configured in
+the companion app's new "Panels" fieldset (see "Companion app" below). Only one panel is visible at
+a time; a **quadruple wrist tap** rotates to the next one. This reuses the exact same accelerometer
+jolt detector as the page-turn gesture below (same axis/threshold/ringdown/window settings, same tap
+sequence state machine) — the only difference is the sequence's final tap count: **3** turns the
+page within the current panel, **4** rotates to the next panel. Any other count (1, 2, 5+) is
+discarded, same as before.
+
+Panel rotation does **not** depend on `EnablePagination` — it works whether pagination is on or off,
+since it's a different axis (which source you're looking at) than pagination (which page of that
+source you're on). Consequently the accelerometer is now subscribed whenever **either**
+`EnablePagination` is on **or** more than one panel is active (`prv_update_accel_subscription()`,
+called from `prv_init()` and from both the `EnablePagination` and `PanelCount` inbox branches) —
+previously it was gated on `EnablePagination` alone.
+
+**Panel header / indicator:** rather than adding a separate row of dots for "which panel," the
+existing plain divider line at the top of the info area doubles as the indicator. If the current
+panel has a non-empty `PanelTitle`, it's drawn left-aligned at the start of that line and the rule
+fills the rest of the width, e.g. `Events————————————`; switching panels (quadruple tap) changes the
+label immediately. A panel with an empty title (or when only one panel is configured) falls back to
+the plain full-width rule from v1/v2 — unchanged behavior for the common single-panel case.
+
+Rotating panels resets the page within the new panel to `0` (`s_page = 0`) — a page position from
+one panel has no meaning in another.
+
 ### Message flow
 
-PKJS sends **one `ItemCount` message, then one message per item** (not one giant message) —
-Pebble's outbox is single-buffered, so each `sendAppMessage()` call awaits its success/failure
-callback before sending the next (see `sendItemAt()`'s recursive continuation in
-`src/pkjs/index.js`):
+PKJS sends **one `PanelCount` message, then, for each panel, one `ItemCount`/`PanelTitle` message
+followed by one message per item** (not one giant message) — Pebble's outbox is single-buffered, so
+each `sendAppMessage()` call awaits its success/failure callback before sending the next (see the
+flat panel/item step queue in `src/pkjs/index.js`):
 
-1. **Reset:** `{ItemCount: N}` where `0 <= N <= 8`.
-   Watch clears its current item list on receipt (even if `N == 0` — an empty list is valid,
-   e.g. no events today).
-2. **Items ×N:** for `i` in `0 until N`, one message:
-   `{ItemIndex: i, ItemType: 0|1|255, ItemPrefix: "<=11 chars>", ItemText: "<=39 chars>"}`.
-   Watch writes into `s_items[i]`, and marks the info layer dirty as each item lands
-   (progressive rendering) rather than waiting for all N. `ItemType` is optional (defaults to
-   event); divider items send empty (or omit) `ItemPrefix`/`ItemText`.
+1. **Reset:** `{PanelCount: P}` where `0 <= P <= 4`. Watch clears all panels, resets the current
+   panel and page to `0`, and updates the accelerometer subscription (see "Info panels" above) —
+   even if `P == 0` (no panels configured is valid, renders "Nothing to see").
+2. **Per panel**, for `p` in `0 until P`:
+   a. `{PanelIndex: p, ItemCount: N, PanelTitle: "<=15 chars>"}` where `0 <= N <= 8`. Watch clears
+      panel `p`'s item list and records its title (even if `N == 0`).
+   b. **Items ×N:** for `i` in `0 until N`, one message: `{PanelIndex: p, ItemIndex: i, ItemType:
+      0|1|2|255, ItemPrefix: "<=11 chars>", ItemText: "<=39 chars>"}`. Watch writes into
+      `s_panels[p].items[i]`, and marks the info layer dirty as each item lands (progressive
+      rendering, only visibly so for the currently-displayed panel) rather than waiting for all N.
+      `ItemType` is optional (defaults to event); divider items send empty (or omit)
+      `ItemPrefix`/`ItemText`.
 
-No acknowledgement message flows watch→phone in this version — v1 is phone-to-watch only.
+`PanelIndex` absent on an item/count message ⇒ panel `0`, so a legacy v2 sender that only ever sent
+bare `ItemCount`/`ItemIndex` messages (no `PanelCount` at all) still lands its items in panel 0 and
+renders exactly as before — full backward compatibility with a single-panel-only counterpart.
 
-## Field semantics (calendar use case)
+No acknowledgement message flows watch→phone in this version — phone-to-watch only.
+
+## Field semantics
 
 - `ItemType` = `1` (event) for calendar events, `0` (divider) for the day-separator rows the
-  companion app inserts between calendar days. `255` (other) is reserved for future item kinds.
+  companion app inserts between calendar days, `2` (weather) for the weather panel's rows (see
+  below). `255` (other) is reserved for future item kinds.
 - `ItemPrefix` (events) = weekday + start time, `EEE HH:mm` (24h), e.g. `"Fri 09:00"`, or
   `"EEE •"` (e.g. `"Fri •"`) for all-day events. The weekday is included so items from different
   days are distinguishable at a glance, in addition to the divider between day groups. Empty for
@@ -265,11 +329,40 @@ No acknowledgement message flows watch→phone in this version — v1 is phone-t
   window), each grouped under its own day; the prefix carries a span marker instead of a time:
   `"EEE |->"` on the event's first day, `"EEE <->"` while it is ongoing, and `"EEE <-|"` on its
   last day (e.g. `"Fri |->"`, `"Sat <->"`, `"Sun <-|"`).
-- `ItemText` = event title, truncated to 39 chars by the **companion app** (`CalendarReader
+- `ItemText` (events) = event title, truncated to 39 chars by the **companion app** (`CalendarReader
   .kt`) before it's ever served over HTTP. Empty for dividers.
 - The companion app reads events from the start of today through the next **7 days**, sorts them
   **by start time ascending**, inserts a divider before the first event of each new calendar day
   (never a leading divider), and caps the combined list (events + dividers) at the first 8 items.
+
+### Weather (`ItemType = 2`)
+
+A single item type covers every weather row — there is deliberately **no per-condition type code**
+(no "rain type", "snow type", etc.). Instead:
+
+- `ItemPrefix` = the temperature, formatted per the companion app's °C/°F setting (default °C), e.g.
+  `"22°C"` or `"72°F"`.
+- `ItemText` = a short human-readable condition, optionally with a percentage, e.g. `"Sunny"`,
+  `"Cloudy"`, `"Rain 60%"`, `"Snow"`.
+- The watch (`prv_weather_icon_for()` in `src/c/info-watchface.c`) picks which icon to draw beside
+  the prefix by doing a **case-insensitive substring match on `ItemText`** for a handful of condition
+  keywords (`"rain"`, `"cloud"`, `"snow"`, `"sun"`/`"clear"`, ...), falling back to a generic/default
+  icon for anything it doesn't recognize. This is a deliberate design choice over a dedicated type
+  code per condition: adding a new weather condition later (e.g. "Fog", "Windy") needs **no protocol
+  change at all** — the temp + text still render correctly even if the specific icon isn't
+  recognized yet, it just falls back to the default.
+- The companion app's weather source (`WeatherReader.kt`) delegates to a swappable `WeatherProvider`
+  (`WeatherProvider.kt`), chosen via radio buttons in the app's Weather fieldset:
+  - **Open-Meteo** (`OpenMeteoProvider.kt`) — no API key or signup, ~10,000 free calls/day.
+  - **MET Norway** (`MetNorwayProvider.kt`) — no API key, but their fair-use policy asks for a
+    contact email in the request's User-Agent; the app has a settings field for it, and the
+    provider is skipped (empty panel) until one is entered.
+  - **Test data** — the original fixed fake forecast, needing neither a location fix nor network
+    access; useful for testing indoors/offline.
+  Both real providers need a device location fix (`DeviceLocation.kt`, coarse accuracy, no Play
+  Services dependency) and render an empty panel without one. Every provider funnels through the
+  same formatting into the wire shape described above, so **the protocol itself never changed** —
+  swapping/adding a weather provider is entirely internal to the companion app.
 
 ## Implementation notes
 
@@ -280,7 +373,12 @@ No acknowledgement message flows watch→phone in this version — v1 is phone-t
   render as a horizontal rule in `prv_info_update_proc`, events as before) and a wider
   `prefix[12]` buffer for the `EEE HH:mm` weekday prefix; corner-icon settings (`ShowBattery`,
   `ShowQuietTime`, see "Watch settings" above) were added later and share the same inbox
-  handler.
+  handler. v3 replaced the single flat `s_items[MAX_INFO_ITEMS]` array with
+  `s_panels[MAX_PANELS]`, each holding its own item array/count/title, and reworked the persist
+  key layout to make room (see "Info panels" above); the pagination helpers
+  (`prv_page_end`/`prv_num_pages`/`prv_page_start`/`prv_layout_num_pages`) now take an explicit
+  `(items, count)` pair instead of reading the old globals, so they work against whichever panel
+  is current.
 - **`package.json`:** `pebble.companionApp.android.apps[0].package` =
   `family.dieflomis.infocompanion` is kept even though the companion app no longer uses
   PebbleKit2 — it's still useful for Core app onboarding UX (suggesting the companion app to
@@ -288,4 +386,9 @@ No acknowledgement message flows watch→phone in this version — v1 is phone-t
 - **Companion app (Kotlin):** `CalendarSyncService` must actually be running (permission
   granted, service started) for PKJS's fetch to succeed — there's no retry/backoff beyond
   PKJS's own 15-minute interval, and no user-visible "sync failed" surfacing on the watch side
-  currently (future enhancement, not in scope).
+  currently (future enhancement, not in scope). Since v3, the service's JSON provider assembles
+  a `List<Panel>` from up to 4 configured sources (`CalendarPrefs.panelSources`, set via the
+  "Panels" fieldset in `MainActivity`) — currently `CALENDAR` (`readUpcomingEvents`, unchanged)
+  and `WEATHER` (`WeatherReader.readWeather`, delegating to a selectable `WeatherProvider` — see
+  "Weather" above) — and serializes them with `panelsToJson()` instead of the old flat
+  `itemsToJson()`.

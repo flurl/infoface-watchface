@@ -50,11 +50,11 @@ module.exports = [
   },
   {
     "type": "heading",
-    "defaultValue": "Page-Turn Tap Gesture"
+    "defaultValue": "Wrist Tap Gestures"
   },
   {
     "type": "text",
-    "defaultValue": "Only relevant when Enable Pagination (above) is on. A TRIPLE tap on the watch turns the info-feed page -- single and double taps are ignored. These controls tune how taps are detected -- see PROTOCOL.md for the full explanation of each one."
+    "defaultValue": "A TRIPLE tap on the watch turns the info-feed page (only relevant when Enable Pagination, above, is on). A QUADRUPLE tap rotates to the next info panel (Events, Weather, ...) -- this works regardless of the Enable Pagination setting. Single and double taps are ignored either way. These controls tune how ALL taps are detected -- see PROTOCOL.md for the full explanation of each one."
   },
   {
     "type": "toggle",
