@@ -132,15 +132,20 @@ static bool s_bt_connected = true;
 #define ITEM_TYPE_DIVIDER 0
 #define ITEM_TYPE_EVENT 1
 #define ITEM_TYPE_WEATHER 2
+#define ITEM_TYPE_FEED 3
 #define ITEM_TYPE_OTHER 255
 
 // Generic info item: `prefix` is a short left column (a weekday+time, a temp,
 // a source tag like "RSS", etc.), `text` is the main line (event title,
-// headline, weather condition, ...).
+// headline, weather condition, ...). Sized to 60 usable chars (rather than the 39 every other
+// item type actually needs) so a feed headline can fill both lines of ITEM_TYPE_FEED's two-line
+// layout at this screen's full width -- measured on-device: GOTHIC_18 fits ~58 chars of
+// representative prose across two full-width (width - 8) lines on a 200px-wide screen, see
+// PROTOCOL.md's "Feed" section.
 typedef struct {
   uint8_t type;
   char prefix[12];
-  char text[40];
+  char text[61];
 } InfoItem;
 
 #define MAX_INFO_ITEMS 8
@@ -168,6 +173,14 @@ static int s_page = 0;
 
 static const int ROW_HEIGHT = 22;
 static const int DIVIDER_ROW_HEIGHT = 12;
+// Height of a single line within a two-line feed row. Deliberately tighter than ROW_HEIGHT
+// (which includes padding sized for a single-line row): at ROW_HEIGHT's 22px, two full feed
+// rows (2 * 2*22 = 88px) don't fit in the ~84px actually left over once PAGE_INDICATOR_H is
+// reserved for a multi-page feed panel on a 200x228 screen -- pagination then falls back to
+// just 1 item/page. 20px keeps two full items (2 * 2*20 = 80px) comfortably inside that budget
+// while still fitting GOTHIC_18 without clipping.
+static const int FEED_LINE_HEIGHT = 20;
+static const int FEED_ROW_HEIGHT = 2 * FEED_LINE_HEIGHT;
 // Reserved strip at the bottom of the info layer for the page-dot indicator,
 // only actually consumed (i.e. subtracted from the pagination height) when
 // there's more than one page.
@@ -457,6 +470,18 @@ static void prv_inbox_dropped_handler(AppMessageResult reason, void *context) {
   APP_LOG(APP_LOG_LEVEL_ERROR, "AppMessage inbox dropped, reason: %d", (int)reason);
 }
 
+// Row height for one item, by type. Shared by the pagination helpers below and prv_draw_rows so
+// they can never disagree about how tall a row is.
+static int prv_row_height(const InfoItem *item) {
+  if (item->type == ITEM_TYPE_DIVIDER) {
+    return DIVIDER_ROW_HEIGHT;
+  }
+  if (item->type == ITEM_TYPE_FEED) {
+    return FEED_ROW_HEIGHT;
+  }
+  return ROW_HEIGHT;
+}
+
 // --- Pagination -------------------------------------------------------
 // The info feed fills a page with as many rows as fit in `height`, then
 // spills the rest onto the next page. These helpers share the exact same
@@ -471,7 +496,7 @@ static int prv_page_end(const InfoItem *items, int count, int start, int height)
   int y = 6;
   int i = start;
   while (i < count) {
-    int row_h = (items[i].type == ITEM_TYPE_DIVIDER) ? DIVIDER_ROW_HEIGHT : ROW_HEIGHT;
+    int row_h = prv_row_height(&items[i]);
     if (i > start && y + row_h > height) {
       break;
     }
@@ -552,7 +577,7 @@ typedef enum {
 // "sun"/"clear" and anything unrecognized, so a condition word this list
 // doesn't know yet still renders sensibly instead of drawing nothing.
 static WeatherIcon prv_weather_icon_for(const char *text) {
-  char lower[40];
+  char lower[61]; // matches InfoItem.text's capacity, see the struct above
   size_t len = strlen(text);
   if (len >= sizeof(lower)) {
     len = sizeof(lower) - 1;
@@ -626,6 +651,54 @@ static void prv_draw_weather_icon(GContext *ctx, GRect slot, WeatherIcon icon) {
   }
 }
 
+// How many leading bytes of `text` fit on one line at `narrow_w` pixels, breaking only at a
+// space (never mid-word), when rendered in `font`. Used by the ITEM_TYPE_FEED branch below to
+// find where the heading's first line (squeezed next to the feed-name column) ends, so the rest
+// can be redrawn on a second line at the full row width instead of continuing to wrap inside the
+// narrow column. Greedily grows a candidate word-by-word, measuring each with
+// graphics_text_layout_get_content_size (the same layout engine graphics_draw_text itself uses)
+// against a single line's height at `narrow_w` -- the moment a candidate would wrap to a second
+// line, the previous (fitting) candidate's length is the split point. Returns strlen(text) if
+// the whole string already fits on one line.
+static size_t prv_feed_line1_len(const char *text, GFont font, int narrow_w) {
+  size_t len = strlen(text);
+  if (len == 0) {
+    return 0;
+  }
+
+  int line_h = graphics_text_layout_get_content_size(
+                   "Ag", font, GRect(0, 0, 1000, 1000), GTextOverflowModeWordWrap, GTextAlignmentLeft)
+                   .h;
+
+  char candidate[61]; // matches InfoItem.text's capacity, see the struct above
+  size_t last_fit = 0;
+  size_t i = 0;
+  while (i <= len) {
+    size_t next = i;
+    while (next < len && text[next] != ' ') {
+      next++;
+    }
+    size_t clen = next;
+    if (clen >= sizeof(candidate)) {
+      clen = sizeof(candidate) - 1;
+    }
+    memcpy(candidate, text, clen);
+    candidate[clen] = '\0';
+
+    GSize size = graphics_text_layout_get_content_size(
+        candidate, font, GRect(0, 0, narrow_w, 1000), GTextOverflowModeWordWrap, GTextAlignmentLeft);
+    if (size.h > line_h) {
+      break; // adding this word pushed the candidate onto a second line -- stop before it
+    }
+    last_fit = next;
+    if (next >= len) {
+      break; // the whole string fits on one line
+    }
+    i = next + 1; // skip the space, try the next word
+  }
+  return last_fit;
+}
+
 // Draws items[start, end) top-anchored at y = y_offset + 6, at the given
 // width. Shared by both the paginated and non-paginated rendering paths in
 // prv_info_update_proc so they can't drift apart. `y_offset` is the height
@@ -635,13 +708,53 @@ static void prv_draw_rows(GContext *ctx, GFont prefix_font, GFont text_font, int
   int y = y_offset + 6;
   for (int i = start; i < end; i++) {
     bool is_divider = items[i].type == ITEM_TYPE_DIVIDER;
-    int row_h = is_divider ? DIVIDER_ROW_HEIGHT : ROW_HEIGHT;
+    int row_h = prv_row_height(&items[i]);
 
     if (is_divider) {
       int line_y = y + row_h / 2;
       graphics_context_set_stroke_color(ctx, GColorLightGray);
       graphics_context_set_stroke_width(ctx, 1);
       graphics_draw_line(ctx, GPoint(4, line_y), GPoint(width - 4, line_y));
+      y += row_h;
+      continue;
+    }
+
+    if (items[i].type == ITEM_TYPE_FEED) {
+      // Two-line layout: the feed name sits top-aligned in the normal single-line prefix
+      // column. The heading's first line is squeezed into the narrow column beside it (like
+      // every other item type), but its second line uses the FULL row width -- including the
+      // space the prefix column occupies on line 1 -- rather than staying confined to the
+      // narrow column for both lines. graphics_draw_text can't vary a box's width per wrapped
+      // line, so prv_feed_line1_len() finds the word-wrap split point at the narrow width and
+      // the two lines are drawn as two separate calls with two different box widths.
+      int narrow_w = width - 80;
+      size_t split = prv_feed_line1_len(items[i].text, text_font, narrow_w);
+
+      char line1[61]; // matches InfoItem.text's capacity
+      size_t line1_len = split < sizeof(line1) ? split : sizeof(line1) - 1;
+      memcpy(line1, items[i].text, line1_len);
+      line1[line1_len] = '\0';
+
+      GRect name_rect = GRect(4, y, 70, FEED_LINE_HEIGHT);
+      GRect line1_rect = GRect(76, y, narrow_w, FEED_LINE_HEIGHT);
+      graphics_context_set_text_color(ctx, PBL_IF_COLOR_ELSE(GColorVividCerulean, GColorWhite));
+      graphics_draw_text(ctx, items[i].prefix, prefix_font, name_rect,
+                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      graphics_context_set_text_color(ctx, GColorWhite);
+      graphics_draw_text(ctx, line1, text_font, line1_rect,
+                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+
+      size_t text_len = strlen(items[i].text);
+      if (split < text_len) {
+        const char *line2 = items[i].text + split;
+        if (*line2 == ' ') {
+          line2++; // split lands on the space between words -- skip it, not part of either line
+        }
+        GRect line2_rect = GRect(4, y + FEED_LINE_HEIGHT, width - 8, FEED_LINE_HEIGHT);
+        graphics_draw_text(ctx, line2, text_font, line2_rect,
+                            GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      }
+
       y += row_h;
       continue;
     }

@@ -115,13 +115,13 @@ Current build (`build/js/message_keys.json` on the VM, 2026-07-14):
 |-----------------|-----------:|-------------|--------------------------------------|
 | `ItemCount`     | `10000`    | UInt8       | 0–8 (see `MAX_INFO_ITEMS`)           |
 | `ItemPrefix`    | `10001`    | cstring     | ≤ 11 chars + NUL (`char prefix[12]`) |
-| `ItemText`      | `10002`    | cstring     | ≤ 39 chars + NUL (`char text[40]`)   |
+| `ItemText`      | `10002`    | cstring     | ≤ 60 chars + NUL (`char text[61]`)   |
 | `ItemIndex`     | `10003`    | UInt8       | 0-based, `< ItemCount`               |
 | `ShowBattery`   | `10004`    | UInt8       | `0` or `1` (see below)               |
 | `ShowQuietTime` | `10005`    | UInt8       | `0` or `1` (see below)               |
 | `ShowBluetooth` | `10006`    | UInt8       | `0` or `1` (see below)               |
 | `ServerUrl`     | `10007`    | cstring     | PKJS-only, see below — C ignores it  |
-| `ItemType`      | `10008`    | UInt8       | `0`=divider, `1`=event, `2`=weather, `255`=other |
+| `ItemType`      | `10008`    | UInt8       | `0`=divider, `1`=event, `2`=weather, `3`=feed, `255`=other |
 | `TapAxisX`      | `10009`    | UInt8       | `0` or `1` (see "Page-turn tap gesture" below) |
 | `TapAxisY`      | `10010`    | UInt8       | `0` or `1`                           |
 | `TapAxisZ`      | `10011`    | UInt8       | `0` or `1`                           |
@@ -305,7 +305,7 @@ flat panel/item step queue in `src/pkjs/index.js`):
    a. `{PanelIndex: p, ItemCount: N, PanelTitle: "<=15 chars>"}` where `0 <= N <= 8`. Watch clears
       panel `p`'s item list and records its title (even if `N == 0`).
    b. **Items ×N:** for `i` in `0 until N`, one message: `{PanelIndex: p, ItemIndex: i, ItemType:
-      0|1|2|255, ItemPrefix: "<=11 chars>", ItemText: "<=39 chars>"}`. Watch writes into
+      0|1|2|3|255, ItemPrefix: "<=11 chars>", ItemText: "<=60 chars>"}`. Watch writes into
       `s_panels[p].items[i]`, and marks the info layer dirty as each item lands (progressive
       rendering, only visibly so for the currently-displayed panel) rather than waiting for all N.
       `ItemType` is optional (defaults to event); divider items send empty (or omit)
@@ -321,7 +321,8 @@ No acknowledgement message flows watch→phone in this version — phone-to-watc
 
 - `ItemType` = `1` (event) for calendar events, `0` (divider) for the day-separator rows the
   companion app inserts between calendar days, `2` (weather) for the weather panel's rows (see
-  below). `255` (other) is reserved for future item kinds.
+  below), `3` (feed) for RSS/Atom feed entries (see below). `255` (other) is reserved for future
+  item kinds.
 - `ItemPrefix` (events) = weekday + start time, `EEE HH:mm` (24h), e.g. `"Fri 09:00"`, or
   `"EEE •"` (e.g. `"Fri •"`) for all-day events. The weekday is included so items from different
   days are distinguishable at a glance, in addition to the divider between day groups. Empty for
@@ -329,8 +330,11 @@ No acknowledgement message flows watch→phone in this version — phone-to-watc
   window), each grouped under its own day; the prefix carries a span marker instead of a time:
   `"EEE |->"` on the event's first day, `"EEE <->"` while it is ongoing, and `"EEE <-|"` on its
   last day (e.g. `"Fri |->"`, `"Sat <->"`, `"Sun <-|"`).
-- `ItemText` (events) = event title, truncated to 39 chars by the **companion app** (`CalendarReader
-  .kt`) before it's ever served over HTTP. Empty for dividers.
+- `ItemText` (events) = event title, truncated to the shared `TEXT_MAX_LEN` (60 chars, see
+  "Message keys" above) by the **companion app** (`CalendarReader.kt`) before it's ever served
+  over HTTP. Empty for dividers. `TEXT_MAX_LEN` is sized for `ItemType = 3`'s two-line feed
+  layout (see "Feed" below) rather than anything event-specific — events just inherit the same
+  shared limit and, in practice, rarely produce a title anywhere near it.
 - The companion app reads events from the start of today through the next **7 days**, sorts them
   **by start time ascending**, inserts a divider before the first event of each new calendar day
   (never a leading divider), and caps the combined list (events + dividers) at the first 8 items.
@@ -364,6 +368,68 @@ A single item type covers every weather row — there is deliberately **no per-c
   same formatting into the wire shape described above, so **the protocol itself never changed** —
   swapping/adding a weather provider is entirely internal to the companion app.
 
+### Feed (`ItemType = 3`)
+
+The "Feeds" info source (`InfoSource.RSS` in the companion app) reads **one or more**
+user-configured RSS/Atom feeds (`CalendarPrefs.rssFeeds()`/`RssFeed`, mirroring the ICS calendar
+feed list below — add/edit/remove any number of `(url, name)` subscriptions in the app's "Feeds"
+fieldset), merges every feed's entries into a single list, sorts that combined list by publish
+timestamp (newest first, across feeds — not grouped by feed), and takes the top
+`MAX_COMBINED_FEED_ITEMS` (4). Each entry renders as a **two-line item** on the watch, unlike
+every other item type (one line):
+
+```
+| Feed name | First part of the heading   |
+|           | second part of the heading  |
+```
+
+- `ItemPrefix` = the *originating* feed's user-defined name (≤ 11 chars, same `PREFIX_MAX_LEN`
+  cap as every other prefix — `CalendarPrefs.setRssFeedName` truncates), so items from different
+  feeds are distinguishable at a glance once merged. Drawn top-aligned, single line, in the
+  normal prefix column.
+- `ItemText` = the entry's headline (`<title>` of an RSS `<item>` or an Atom `<entry>`), truncated
+  to the shared `TEXT_MAX_LEN` (60 chars, see "Message keys" above — widened from the 39-char
+  limit every other item type actually needs, specifically so a feed headline can fill both
+  lines here) by the companion app before it's served. The watch (`prv_draw_rows`,
+  `ITEM_TYPE_FEED` branch in `src/c/info-watchface.c`) renders this across **two lines with two
+  different widths**, not a single word-wrapped box: the first line is squeezed into the normal
+  (narrower) text column beside the prefix, like every other item type, but the **second line
+  uses the panel's full row width** — including the space the prefix column occupies on line
+  1 — since there's no prefix competing for room on that line. `graphics_draw_text` can't vary a
+  box's width per wrapped line, so `prv_feed_line1_len()` finds the word-wrap split point at the
+  narrow width (via `graphics_text_layout_get_content_size`, the same layout engine
+  `graphics_draw_text` itself uses) and the two lines are drawn as two separate calls with two
+  different box widths; a headline that still overflows both lines is ellipsized on the second
+  line as usual. Row height (`FEED_ROW_HEIGHT` = 2×`FEED_LINE_HEIGHT`, 40px total) is
+  deliberately tighter than the single-line `ROW_HEIGHT` so two full feed items (4 rows) still
+  fit on one page even after `PAGE_INDICATOR_H` is reserved for a multi-page feed panel — using
+  `ROW_HEIGHT` for both lines was tried first and left only 1 item/page on a 200×228 screen.
+- The companion app (`RssReader.kt`) fetches each feed independently over `HttpURLConnection`,
+  **HTTPS-only** — a non-`https://` URL is rejected in the app's UI before it's ever stored, and
+  `readRss` re-checks every feed's scheme as a second line of defense (one bad URL just
+  contributes nothing, it doesn't drop the others). Parsing is delegated to
+  [ROME](https://github.com/rometools/rome) (`com.rometools:rome`, a real dependency — see
+  `app/build.gradle.kts`) rather than hand-rolled: an earlier hand-rolled `android.util.Xml`
+  pull-parser version needed two separate bugfixes against real feeds during testing (RSS
+  1.0/RDF's Dublin Core `<dc:date>` not being recognized at all, then a `<pubDate>` zone token —
+  `"Z"` instead of `"GMT"`/a numeric offset — that `DateTimeFormatter.RFC_1123_DATE_TIME` rejects
+  outright) before being replaced with ROME, the same rationale this project already applied to
+  ICS calendar parsing via `biweekly`. `SyndEntry.publishedDate`/`updatedDate` cover RSS 2.0's
+  `<pubDate>` and Atom's `<published>`/`<updated>`; RSS 1.0/RDF's `<dc:date>` isn't always
+  promoted to `publishedDate` by ROME's synd conversion layer, so `entryDateMillis()` falls back
+  to reading the `DCModule` directly. Up to `MAX_FEED_ITEMS_PER_SOURCE` (8) entries are kept per
+  feed, a looser per-source cap than the final combined 4 so that merging across feeds of
+  different posting frequency rarely drops a genuinely-newer entry. An entry with no date any of
+  these ways gets timestamp 0, sorting it last rather than being dropped. A 15-minute in-memory
+  per-URL cache avoids re-fetching every feed on every PKJS poll, mirroring
+  `CalendarFeedReader`'s ICS-feed cache; a fetch/parse failure for one feed serves its last good
+  cache (or contributes nothing) rather than breaking the `/items` response for the rest.
+- Distinct from, and unrelated to, the companion app's existing **ICS calendar feed**
+  subscriptions (`CalendarPrefs.feeds()`/`CalendarFeed`, which back the `CALENDAR` source and are
+  URL-only, no per-feed name) — naming collision avoided by using `Rss*`-prefixed names
+  (`RssReader`, `RssFeed`, `rssFeeds()`) throughout the companion app, even though both surface as
+  "Feeds"-labeled UI and share the same add/edit/delete list pattern.
+
 ## Implementation notes
 
 - **Watchface C (`src/c/info-watchface.c`):** the PKJS bridge itself only changed *who* sends
@@ -378,7 +444,15 @@ A single item type covers every weather row — there is deliberately **no per-c
   key layout to make room (see "Info panels" above); the pagination helpers
   (`prv_page_end`/`prv_num_pages`/`prv_page_start`/`prv_layout_num_pages`) now take an explicit
   `(items, count)` pair instead of reading the old globals, so they work against whichever panel
-  is current.
+  is current. `ITEM_TYPE_FEED` (see "Feed" above) added a per-type row-height helper,
+  `prv_row_height()`, shared by the pagination helpers and `prv_draw_rows` so a feed item's
+  taller `FEED_ROW_HEIGHT` row can never cause the two to disagree about where a page break
+  falls — the same failure mode the divider/event row-height split was already guarding
+  against. `InfoItem`'s `text` field grew from `[40]` to `[61]` (`TEXT_MAX_LEN` 39→60) to give
+  feed headlines enough room to fill both lines of the new layout — measured on-device via
+  `graphics_text_layout_get_content_size` rather than guessed (see "Feed" above); every other
+  item type inherits the wider shared limit too, though none of them need it. `InfoItem.prefix`
+  (`[12]`) is unaffected.
 - **`package.json`:** `pebble.companionApp.android.apps[0].package` =
   `family.dieflomis.infocompanion` is kept even though the companion app no longer uses
   PebbleKit2 — it's still useful for Core app onboarding UX (suggesting the companion app to
