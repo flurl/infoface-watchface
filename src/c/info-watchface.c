@@ -254,16 +254,26 @@ static void prv_load_cached_panels(void) {
   s_panel_count = count;
 }
 
-// Defined further down, after prv_accel_data_handler (which they reference).
-// Forward declared here because prv_inbox_received_handler and prv_init need
-// to update the accelerometer subscription on PanelCount/EnablePagination
-// changes, and prv_advance_panel is used by the gesture dispatch below.
+// Defined further down. Forward declared here because prv_inbox_received_handler and prv_init
+// need to update the accelerometer subscription on PanelCount/EnablePagination changes, and
+// prv_advance_panel/prv_advance_page are now also called directly from
+// prv_inbox_received_handler's system button-event handling (below), ahead of their own
+// definitions (which sit next to their other caller, the gesture dispatch in
+// prv_accel_data_handler).
 static void prv_subscribe_accel(void);
 static void prv_unsubscribe_accel(void);
 static void prv_update_accel_subscription(void);
+static void prv_advance_page(void);
+static void prv_advance_panel(void);
+
+// System message key, separate from package.json's auto-assigned MESSAGE_KEY_* range (>= 10000):
+// keys below 10000 are reserved for messages injected directly by PebbleOS firmware, bypassing
+// PKJS entirely. See PROTOCOL.md.
+#define SYSTEM_MESSAGE_KEY_BUTTON_EVENT 9999
 
 // AppMessage inbox: see PROTOCOL.md for the full contract. Messages arrive
 // in one of these shapes:
+//   - {ButtonEvent: <ButtonId>}                                     -- system-injected, see above
 //   - {ShowBattery: 0|1, ShowQuietTime: 0|1, ShowBluetooth: 0|1, EnablePagination: 0|1,
 //      TapAxisX/Y/Z: 0|1, TapThresholdMg/TapRingdownMs/TapMultiTapWindowMs: N,
 //      ServerUrl: "..."} (any subset) -- from the Clay settings page, all
@@ -275,6 +285,27 @@ static void prv_update_accel_subscription(void);
 // legacy v2-only sender (bare ItemCount/ItemIndex, no PanelCount ever) still
 // lands its items in panel 0 and renders exactly as it did pre-panels.
 static void prv_inbox_received_handler(DictionaryIterator *iterator, void *context) {
+  // System-injected button event: sent directly by PebbleOS firmware (not PKJS) when a
+  // long-press of UP targets this watchface instead of launching another app -- see PROTOCOL.md.
+  // The firmware serializes the button ID as a UInt32 (TupletInteger on a uint32_t), so this must
+  // be read via ->value->uint32, not ->value->uint8 (same class of bug as TapThresholdMg et al
+  // below -- reading the wrong width silently reads back nonsense for anything past 255, though
+  // for these small values it happens to work out by coincidence, so don't copy the shortcut).
+  Tuple *button_event_tuple = dict_find(iterator, SYSTEM_MESSAGE_KEY_BUTTON_EVENT);
+  if (button_event_tuple) {
+    switch (button_event_tuple->value->uint32) {
+      case BUTTON_ID_UP:
+        prv_advance_panel();
+        break;
+      case BUTTON_ID_SELECT:
+        prv_advance_page();
+        break;
+      default:
+        break;
+    }
+    return;
+  }
+
   bool handled_setting = false;
 
   Tuple *show_battery_tuple = dict_find(iterator, MESSAGE_KEY_ShowBattery);
@@ -906,6 +937,9 @@ static int s_accel_pending_countdown = 0;
 static bool s_accel_subscribed = false;
 
 static void prv_advance_page(void) {
+  if (!s_enable_pagination) {
+    return;
+  }
   InfoPanel *panel = &s_panels[s_panel];
   int header_h = panel->title[0] != '\0' ? PANEL_HEADER_H : 0;
   int content_h_full = layer_get_bounds(s_info_layer).size.h - header_h;
@@ -967,9 +1001,7 @@ static void prv_accel_data_handler(AccelData *data, uint32_t num_samples) {
       } else {
         // No further tap arrived in time -- the sequence is finished.
         if (s_accel_tap_count == ACCEL_TAP_PAGE_COUNT) {
-          if (s_enable_pagination) {
-            prv_advance_page();
-          }
+          prv_advance_page();
         } else if (s_accel_tap_count == ACCEL_TAP_PANEL_COUNT) {
           prv_advance_panel();
         }

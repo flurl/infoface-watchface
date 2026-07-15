@@ -186,13 +186,41 @@ sends the settings dict over the **same** `AppMessage` inbox as calendar sync �
   `localStorage['clay-settings']` (`getServerUrl()`), not from AppMessage — see
   "PebbleKit JS" above.
 
+### System button events
+
+The rest of this file documents keys declared in `package.json`'s `pebble.messageKeys`, which the
+Pebble build tool auto-assigns `uint32` IDs starting at **10000**, always sent by PKJS or the
+companion app. `ButtonEvent` is the one exception to both halves of that: it's a **plain numeric
+`#define`, not declared in `package.json`**, using key **`9999`** — deliberately below 10000, a
+range reserved for future system-injected messages like it — and it's sent by neither PKJS nor the
+companion app. Instead, PebbleOS firmware itself (`shell/normal/watchface.c`'s
+`prv_notify_if_running_watchface`, called from both `prv_quick_launch_handler` (long-press/"Hold X"
+quick-launch settings) and `prv_launch_up_down` (short tap/"Tap Up"/"Tap Down" settings), in the
+`coredevices/pebbleos` fork) writes it directly into this watchface's own AppMessage inbox,
+bypassing Bluetooth/PKJS entirely, whenever a button's configured quick-launch target (set from the
+watch's own Settings → Quick Launch screen) resolves to the watchface that's currently running —
+instead of the ordinary self-launch, which would otherwise just no-op. See that fork's firmware-side
+documentation for the injection mechanism; from this watchface's side it's an ordinary inbound
+AppMessage, indistinguishable on the wire from anything PKJS could send.
+
+- **`ButtonEvent`** (key `9999`, **UInt32** — not UInt8; the firmware serializes a `ButtonId` via
+  `TupletInteger` on a `uint32_t`, so the C handler must read `->value->uint32`): the `ButtonId`
+  that triggered the notification. `1` (`BUTTON_ID_UP`) rotates to the next info panel
+  (`prv_advance_panel()`); `2` (`BUTTON_ID_SELECT`) turns to the next page within the current panel
+  (`prv_advance_page()`, a no-op unless `EnablePagination` is on); other values (`0`=BACK, `3`=DOWN)
+  are received but ignored by this watchface today. Which button actually triggers a `ButtonEvent`
+  is fully user-configurable on the firmware side (any Quick Launch tap/hold slot can be pointed at
+  a watchface, not just UP) — no watchface-side changes needed to support more buttons, only the
+  `switch` above needs new cases if UP/SELECT stop being the only ones worth reacting to.
+
 ### Page-turn tap gesture
 
 Pagination itself is off by default — see **`EnablePagination`** below — and everything in this
 section only matters while it's on.
 
-The watchface has no touch or button input (touch is reserved for watchapps; the system shell
-owns all buttons on a watchface — see `src/c/info-watchface.c`'s comment above
+The watchface has no *direct* touch or button input (touch is reserved for watchapps; the system
+shell owns all buttons on a watchface — with the one narrow exception, `ButtonEvent`, described
+just above — see `src/c/info-watchface.c`'s comment above
 `prv_accel_data_handler`), so the info feed's page turns are driven by a hand-rolled
 accelerometer jolt detector (`accel_data_service_subscribe()`, **not**
 `accel_tap_service_subscribe()` — the latter is fed by the system's shared "Motion Sensitivity"
