@@ -124,15 +124,18 @@ static bool s_bt_connected = true;
 
 // Info item type (shared by *value* with the companion app / PKJS, see
 // PROTOCOL.md). Divider rows render as a horizontal rule and ignore
-// prefix/text; event/weather/other rows render the prefix + text columns.
-// Deliberately only ONE code for all weather conditions -- the specific icon
-// is picked watch-side by parsing ItemText for a keyword (see
-// prv_weather_icon_for below), not by adding a type per condition, so a new
-// condition never needs a protocol change.
+// prefix/text; event/weather/json/other rows render the prefix + text
+// columns (ITEM_TYPE_JSON needs no dedicated rendering branch -- it falls
+// through to the same default single-line layout as event/other, see
+// prv_draw_rows). Deliberately only ONE code for all weather conditions --
+// the specific icon is picked watch-side by parsing ItemText for a keyword
+// (see prv_weather_icon_for below), not by adding a type per condition, so a
+// new condition never needs a protocol change.
 #define ITEM_TYPE_DIVIDER 0
 #define ITEM_TYPE_EVENT 1
 #define ITEM_TYPE_WEATHER 2
 #define ITEM_TYPE_FEED 3
+#define ITEM_TYPE_JSON 4
 #define ITEM_TYPE_OTHER 255
 
 // Generic info item: `prefix` is a short left column (a weekday+time, a temp,

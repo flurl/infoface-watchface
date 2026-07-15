@@ -121,7 +121,7 @@ Current build (`build/js/message_keys.json` on the VM, 2026-07-14):
 | `ShowQuietTime` | `10005`    | UInt8       | `0` or `1` (see below)               |
 | `ShowBluetooth` | `10006`    | UInt8       | `0` or `1` (see below)               |
 | `ServerUrl`     | `10007`    | cstring     | PKJS-only, see below — C ignores it  |
-| `ItemType`      | `10008`    | UInt8       | `0`=divider, `1`=event, `2`=weather, `3`=feed, `255`=other |
+| `ItemType`      | `10008`    | UInt8       | `0`=divider, `1`=event, `2`=weather, `3`=feed, `4`=json, `255`=other |
 | `TapAxisX`      | `10009`    | UInt8       | `0` or `1` (see "Page-turn tap gesture" below) |
 | `TapAxisY`      | `10010`    | UInt8       | `0` or `1`                           |
 | `TapAxisZ`      | `10011`    | UInt8       | `0` or `1`                           |
@@ -305,7 +305,7 @@ flat panel/item step queue in `src/pkjs/index.js`):
    a. `{PanelIndex: p, ItemCount: N, PanelTitle: "<=15 chars>"}` where `0 <= N <= 8`. Watch clears
       panel `p`'s item list and records its title (even if `N == 0`).
    b. **Items ×N:** for `i` in `0 until N`, one message: `{PanelIndex: p, ItemIndex: i, ItemType:
-      0|1|2|3|255, ItemPrefix: "<=11 chars>", ItemText: "<=60 chars>"}`. Watch writes into
+      0|1|2|3|4|255, ItemPrefix: "<=11 chars>", ItemText: "<=60 chars>"}`. Watch writes into
       `s_panels[p].items[i]`, and marks the info layer dirty as each item lands (progressive
       rendering, only visibly so for the currently-displayed panel) rather than waiting for all N.
       `ItemType` is optional (defaults to event); divider items send empty (or omit)
@@ -321,8 +321,8 @@ No acknowledgement message flows watch→phone in this version — phone-to-watc
 
 - `ItemType` = `1` (event) for calendar events, `0` (divider) for the day-separator rows the
   companion app inserts between calendar days, `2` (weather) for the weather panel's rows (see
-  below), `3` (feed) for RSS/Atom feed entries (see below). `255` (other) is reserved for future
-  item kinds.
+  below), `3` (feed) for RSS/Atom feed entries (see below), `4` (json) for the generic JSON
+  source's entries (see below). `255` (other) is reserved for future item kinds.
 - `ItemPrefix` (events) = weekday + start time, `EEE HH:mm` (24h), e.g. `"Fri 09:00"`, or
   `"EEE •"` (e.g. `"Fri •"`) for all-day events. The weekday is included so items from different
   days are distinguishable at a glance, in addition to the divider between day groups. Empty for
@@ -430,6 +430,92 @@ every other item type (one line):
   (`RssReader`, `RssFeed`, `rssFeeds()`) throughout the companion app, even though both surface as
   "Feeds"-labeled UI and share the same add/edit/delete list pattern.
 
+### JSON (`ItemType = 4`)
+
+The "JSON" info source (`InfoSource.JSON` in the companion app) reads **one or more**
+user-configured generic JSON sources (`CalendarPrefs.jsonSources()`/`JsonSource`, mirroring the
+RSS/Atom feed list above — add/edit/remove any number of `(url, jsonPath, name, maxItems)`
+entries in the app's "JSON" fieldset). Each source's `url` can return **any** JSON document —
+`JsonReader.kt` fetches (and caches) the raw response body per URL, then evaluates `jsonPath`
+**once against the whole document** (not per array element) using
+[Jayway JsonPath](https://github.com/json-path/JsonPath) (`com.jayway.jsonpath:json-path`, a real
+dependency — see `app/build.gradle.kts`).
+
+A single JSONPath expression is enough to both **locate** a (possibly nested) array and
+**extract** a field from each of its elements, using JSONPath's indefinite `[*]`/`..` wildcard
+segments — there is deliberately no separate "root path" input, since it would just be the same
+path prefix repeated across two fields:
+
+- Plain top-level array (`[{"title": "a"}, {"title": "b"}, ...]`): `$[*].title`.
+- Array nested under a key (`{"key1": "val1", "key2": [{"objkey1": ..., "objkey2": "a"}, ...]}`):
+  `$.key2[*].objkey2`.
+
+`JsonReader.kt` reads every path with `Configuration.defaultConfiguration().addOptions(
+Option.SUPPRESS_EXCEPTIONS, Option.ALWAYS_RETURN_LIST)`: `ALWAYS_RETURN_LIST` means every read
+comes back as a `List` regardless of whether the path used a wildcard, and — verified empirically,
+since this isn't obvious from the option's name alone — an array element that's missing the
+target field is silently **omitted** from that list rather than null-padded or erroring the whole
+read, matching this source's per-element "skip on no match" philosophy without any extra code.
+`SUPPRESS_EXCEPTIONS` additionally covers a path that matches nothing at all (typo'd field name, a
+response shape that doesn't match), turning that into an empty list too instead of a thrown
+`PathNotFoundException`. Each source's own `maxItems` (a per-source dropdown,
+`1..MAX_JSON_ITEMS_PER_SOURCE`, defaulting to `MAX_JSON_ITEMS_PER_SOURCE`, 8) then caps how many
+of the extracted values are kept.
+
+**Breaking change note (pre-existing installs):** earlier builds of this source evaluated
+`jsonPath` **per array element** (so `$.title` meant "this element's `title` field," implicitly
+assuming the whole response was already the target array). An already-configured source using
+that old per-element style needs its path rewritten to the new whole-document style to keep
+working — e.g. `$.title` → `$[*].title` for a plain top-level array. There is no automatic
+migration: a stored path can't be reliably told apart from a coincidentally-valid new-style path,
+so a source with a stale path just silently contributes zero items (same as any other
+no-match — nothing crashes) until its path is edited in the app.
+
+Unlike `ItemType = 3`'s feed merge, sources are **not** sorted together by timestamp — a generic
+JSON document has no universal date field — so the combined result is built by one of two
+user-selectable modes (`CalendarPrefs.jsonSortMode()`/`JsonSortMode`, a "Sorting" radio group
+shown once for the whole fieldset, not per source):
+
+- **Concatenate** (default — the only behavior this source had before `Sorting` existed, so
+  upgrading an existing install doesn't change anything): one source's items after another, in
+  the order sources are listed. Source A (`maxItems=2`) and source B (`maxItems=8`) produce
+  `A1, A2, B1, B2, B3, B4, B5, B6, B7, B8`.
+- **Round robin**: sources take turns contributing one item per round, in list order; a source
+  that runs out of items just stops contributing to later rounds (`JsonReader.kt`'s `interleave`).
+  The same A/B example produces `A1, B1, A2, B2, B3, B4, B5, B6, B7, B8` — note this is a genuine
+  *interleave*, not a sort: elements never leave their own source's relative order, and a source's
+  first item can never appear after another source's *later* items once round 1 completes.
+
+Either way, the resulting list is capped at `MAX_COMBINED_JSON_ITEMS` (8, matching the wire's own
+per-panel cap) — for the A/B example above, that trims the last two `B` items off in both modes.
+
+- `ItemPrefix` = the *originating* source's user-defined name (≤ 11 chars, same `PREFIX_MAX_LEN`
+  cap as every other prefix — `CalendarPrefs.setJsonSourceName` truncates), so items from
+  different sources are distinguishable at a glance once combined, mirroring `ItemType = 3`'s
+  feed-name prefix.
+- `ItemText` = the JSONPath-extracted value, stringified (`toString()`) and truncated to the
+  shared `TEXT_MAX_LEN` (60 chars). An element whose JSONPath match is absent, `null`, or
+  stringifies empty contributes no item (that element is skipped, not the whole source) — same
+  empty-on-failure philosophy as every other source.
+- Renders as a normal **single-line** item on the watch — `ItemType = 4` needs no dedicated
+  drawing branch in `prv_draw_rows`/`prv_row_height`, it falls through to the same default
+  prefix+text layout as `ItemType = 1`/`255`, unlike `ItemType = 3`'s two-line feed layout.
+- The companion app (`JsonReader.kt`) fetches each source's URL independently over
+  `HttpURLConnection`, **HTTPS-only** — a non-`https://` URL is rejected in the app's UI before
+  it's ever stored, and `readJson` re-checks every source's scheme as a second line of defense,
+  same pattern as `readRss`. Delegating JSONPath evaluation to a real library rather than
+  hand-rolling it follows the same rationale this project already applied to RSS/Atom (ROME) and
+  ICS calendar (`biweekly`) parsing. A 15-minute in-memory per-URL cache of the *raw response
+  body* (not anything JSONPath-derived) avoids re-fetching every source on every PKJS poll,
+  mirroring `RssReader`'s cache — editing a source's `jsonPath` in the app still takes effect
+  immediately, since only the fetch (not the JSONPath evaluation) is cached, and two sources that
+  happen to share a URL but use different paths only cost one fetch between them; a fetch failure
+  for one source serves its last good cached body (or contributes nothing) rather than breaking
+  the `/items` response for the rest.
+- Every configured source's panel shares the single **"JSON"** panel title/header
+  (`InfoSource.JSON.title`), the same one-title-per-source-type pattern every other source uses
+  (e.g. "Feeds" for all RSS/Atom subscriptions combined).
+
 ## Implementation notes
 
 - **Watchface C (`src/c/info-watchface.c`):** the PKJS bridge itself only changed *who* sends
@@ -452,7 +538,9 @@ every other item type (one line):
   feed headlines enough room to fill both lines of the new layout — measured on-device via
   `graphics_text_layout_get_content_size` rather than guessed (see "Feed" above); every other
   item type inherits the wider shared limit too, though none of them need it. `InfoItem.prefix`
-  (`[12]`) is unaffected.
+  (`[12]`) is unaffected. `ITEM_TYPE_JSON` (see "JSON" above) needed **no** rendering changes —
+  it deliberately falls through `prv_row_height`/`prv_draw_rows`'s default branch, the same one
+  `ITEM_TYPE_EVENT`/`ITEM_TYPE_OTHER` already use.
 - **`package.json`:** `pebble.companionApp.android.apps[0].package` =
   `family.dieflomis.infocompanion` is kept even though the companion app no longer uses
   PebbleKit2 — it's still useful for Core app onboarding UX (suggesting the companion app to
