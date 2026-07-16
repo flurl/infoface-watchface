@@ -1,14 +1,19 @@
 #include <pebble.h>
 #include <stdlib.h>
 
-// FONT_KEY_LECO_60_NUMBERS_AM_PM only exists on the newer color
-// platforms; older ones fall back to the largest font they do have.
-#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT) || defined(PBL_PLATFORM_GABBRO)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_GABBRO)
 #define TIME_FONT_KEY FONT_KEY_LECO_60_NUMBERS_AM_PM
 #define TIME_HEIGHT_WANTED 64
+#define DATE_FONT_KEY FONT_KEY_GOTHIC_18_BOLD
+#define DATE_HEIGHT 26
 #else
-#define TIME_FONT_KEY FONT_KEY_ROBOTO_BOLD_SUBSET_49
-#define TIME_HEIGHT_WANTED 54
+// Flint's panel is 144x168, much smaller than emery/gabbro -- LECO_60 clips
+// almost entirely off the ~34px available above the date on a screen this size.
+// A smaller date font frees up a few more of those px for a bigger clock.
+#define TIME_FONT_KEY FONT_KEY_LECO_32_BOLD_NUMBERS
+#define TIME_HEIGHT_WANTED 36
+#define DATE_FONT_KEY FONT_KEY_GOTHIC_14_BOLD
+#define DATE_HEIGHT 20
 #endif
 
 // ---------------------------------------------------------------------------
@@ -1415,7 +1420,7 @@ static void prv_window_load(Window *window) {
   // stretched to fill the top half -- otherwise the extra height just
   // becomes dead space below the digits. Clamp to the space actually
   // available so smaller screens still don't overlap the date.
-  const int date_height = 26;
+  const int date_height = DATE_HEIGHT;
   const int gap = 4;
   int available = mid - date_height - top_margin - gap;
   int time_height = available < TIME_HEIGHT_WANTED ? available : TIME_HEIGHT_WANTED;
@@ -1430,7 +1435,7 @@ static void prv_window_load(Window *window) {
   s_date_layer = text_layer_create(GRect(0, top_margin + time_height + gap, bounds.size.w, date_height));
   text_layer_set_background_color(s_date_layer, GColorClear);
   text_layer_set_text_color(s_date_layer, GColorLightGray);
-  text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+  text_layer_set_font(s_date_layer, fonts_get_system_font(DATE_FONT_KEY));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(window_layer, text_layer_get_layer(s_date_layer));
 
