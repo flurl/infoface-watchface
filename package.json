@@ -42,7 +42,9 @@
       "PanelCount",
       "PanelIndex",
       "PanelTitle",
-      "EnableAccelTaps"
+      "EnableAccelTaps",
+      "PanelRotationEvent",
+      "PageRotationEvent"
     ],
     "resources": {
       "media": []

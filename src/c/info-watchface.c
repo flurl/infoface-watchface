@@ -1,4 +1,5 @@
 #include <pebble.h>
+#include <stdlib.h>
 
 // FONT_KEY_LECO_60_NUMBERS_AM_PM only exists on the newer color
 // platforms; older ones fall back to the largest font they do have.
@@ -63,6 +64,10 @@ static char s_date_buf[24];
 #define PERSIST_KEY_TAP_MULTI_TAP_WINDOW_MS 25
 #define PERSIST_KEY_ENABLE_PAGINATION 26
 #define PERSIST_KEY_ENABLE_ACCEL_TAPS 27
+// Only meaningful when PBL_CAPABILITY_QUICK_LAUNCH_BUTTON_SERVICE is defined -- see the
+// QuickLaunchRotationEvent block below.
+#define PERSIST_KEY_PANEL_ROTATION_EVENT 28
+#define PERSIST_KEY_PAGE_ROTATION_EVENT 29
 static bool s_show_battery = true;
 static bool s_show_quiet_time = true;
 static bool s_show_bluetooth_alert = true;
@@ -82,6 +87,29 @@ static bool s_enable_pagination = false;
 // anything, this ANDs in ahead of that: off means the accelerometer is
 // never subscribed to no matter what pagination/panel state says.
 static bool s_enable_accel_taps = true;
+
+#ifdef PBL_CAPABILITY_QUICK_LAUNCH_BUTTON_SERVICE
+// An alternate, button-driven way to trigger panel/page rotation, alongside the wrist-tap
+// gestures above -- only available when built against an SDK generated from a firmware that has
+// quick_launch_button_service (this project's own PebbleOS fork; see PROTOCOL.md). Each of the
+// two Clay dropdowns below picks one of these (or "None") independently, so e.g. "Hold Select"
+// can drive panel rotation while "Tap Up" drives page rotation, or the same event can drive both.
+// The numbering here is this watchface's own encoding (sent by config.js as a Clay "select"
+// value, always a decimal-digit string on the wire) -- it does not correspond to PebbleOS's
+// internal ButtonId values, deliberately, since the two are unrelated address spaces.
+typedef enum {
+  QUICK_LAUNCH_ROTATION_EVENT_NONE = 0,
+  QUICK_LAUNCH_ROTATION_EVENT_TAP_UP = 1,
+  QUICK_LAUNCH_ROTATION_EVENT_TAP_DOWN = 2,
+  QUICK_LAUNCH_ROTATION_EVENT_HOLD_UP = 3,
+  QUICK_LAUNCH_ROTATION_EVENT_HOLD_DOWN = 4,
+  QUICK_LAUNCH_ROTATION_EVENT_HOLD_SELECT = 5,
+  QUICK_LAUNCH_ROTATION_EVENT_HOLD_BACK = 6,
+} QuickLaunchRotationEvent;
+
+static QuickLaunchRotationEvent s_panel_rotation_event = QUICK_LAUNCH_ROTATION_EVENT_NONE;
+static QuickLaunchRotationEvent s_page_rotation_event = QUICK_LAUNCH_ROTATION_EVENT_NONE;
+#endif
 
 // Tap-recognition parameters, tunable at runtime from the Clay settings page
 // (see PROTOCOL.md) so they can be tweaked without recompiling. See
@@ -266,26 +294,62 @@ static void prv_load_cached_panels(void) {
 // Defined further down. Forward declared here because prv_inbox_received_handler and prv_init
 // need to update the accelerometer subscription on PanelCount/EnablePagination changes, and
 // prv_advance_panel/prv_advance_page are now also called directly from
-// prv_inbox_received_handler's system button-event handling (below), ahead of their own
-// definitions (which sit next to their other caller, the gesture dispatch in
-// prv_accel_data_handler).
+// prv_quick_launch_button_handler (below), ahead of their own definitions (which sit next to
+// their other caller, the gesture dispatch in prv_accel_data_handler).
 static void prv_subscribe_accel(void);
 static void prv_unsubscribe_accel(void);
 static void prv_update_accel_subscription(void);
 static void prv_advance_page(void);
 static void prv_advance_panel(void);
 
-// System message key, separate from package.json's auto-assigned MESSAGE_KEY_* range (>= 10000):
-// keys below 10000 are reserved for messages injected directly by PebbleOS firmware, bypassing
-// PKJS entirely. See PROTOCOL.md.
-#define SYSTEM_MESSAGE_KEY_BUTTON_EVENT 9999
+#ifdef PBL_CAPABILITY_QUICK_LAUNCH_BUTTON_SERVICE
+// Maps a raw (button, press type) pair to this watchface's own QuickLaunchRotationEvent encoding
+// -- see the enum's definition above for why the numbering is independent of PebbleOS's ButtonId.
+static QuickLaunchRotationEvent prv_encode_quick_launch_event(ButtonId button_id,
+                                                               QuickLaunchPressType press_type) {
+  switch (button_id) {
+    case BUTTON_ID_UP:
+      return press_type == QuickLaunchPressType_Long ? QUICK_LAUNCH_ROTATION_EVENT_HOLD_UP
+                                                       : QUICK_LAUNCH_ROTATION_EVENT_TAP_UP;
+    case BUTTON_ID_DOWN:
+      return press_type == QuickLaunchPressType_Long ? QUICK_LAUNCH_ROTATION_EVENT_HOLD_DOWN
+                                                       : QUICK_LAUNCH_ROTATION_EVENT_TAP_DOWN;
+    case BUTTON_ID_SELECT:
+      // Select only ever reaches us on a hold -- a short Select press is always PebbleOS's
+      // launcher shortcut instead (see PROTOCOL.md), never delivered here.
+      return QUICK_LAUNCH_ROTATION_EVENT_HOLD_SELECT;
+    case BUTTON_ID_BACK:
+      // Same for Back: a short press always dismisses the timeline peek instead.
+      return QUICK_LAUNCH_ROTATION_EVENT_HOLD_BACK;
+    default:
+      return QUICK_LAUNCH_ROTATION_EVENT_NONE;
+  }
+}
+
+// quick_launch_button_service_subscribe() callback: fires when a quick-launch button configured
+// (Settings > Quick Launch, on-watch) to target this already-running watchface is pressed -- see
+// PROTOCOL.md. Panel and page rotation are triggered independently, so the same event can drive
+// both, one, or neither, depending on the two Clay dropdowns below.
+static void prv_quick_launch_button_handler(ButtonId button_id, QuickLaunchPressType press_type) {
+  QuickLaunchRotationEvent event = prv_encode_quick_launch_event(button_id, press_type);
+  if (event == QUICK_LAUNCH_ROTATION_EVENT_NONE) {
+    return;
+  }
+  if (event == s_panel_rotation_event) {
+    prv_advance_panel();
+  }
+  if (event == s_page_rotation_event) {
+    prv_advance_page();
+  }
+}
+#endif  // PBL_CAPABILITY_QUICK_LAUNCH_BUTTON_SERVICE
 
 // AppMessage inbox: see PROTOCOL.md for the full contract. Messages arrive
 // in one of these shapes:
-//   - {ButtonEvent: <ButtonId>}                                     -- system-injected, see above
 //   - {ShowBattery: 0|1, ShowQuietTime: 0|1, ShowBluetooth: 0|1, EnablePagination: 0|1,
 //      EnableAccelTaps: 0|1, TapAxisX/Y/Z: 0|1,
 //      TapThresholdMg/TapRingdownMs/TapMultiTapWindowMs: N,
+//      PanelRotationEvent/PageRotationEvent: "0".."6",
 //      ServerUrl: "..."} (any subset) -- from the Clay settings page, all
 //      changed fields in one message
 //   - {PanelCount: P}                                              -- resets all panels
@@ -294,28 +358,10 @@ static void prv_advance_panel(void);
 // PanelIndex is optional on the last two shapes and defaults to panel 0, so a
 // legacy v2-only sender (bare ItemCount/ItemIndex, no PanelCount ever) still
 // lands its items in panel 0 and renders exactly as it did pre-panels.
+// Quick-launch-button-driven rotation itself no longer arrives here at all -- it's delivered
+// straight from firmware via quick_launch_button_service_subscribe() (see
+// prv_quick_launch_button_handler above), bypassing AppMessage/PKJS entirely.
 static void prv_inbox_received_handler(DictionaryIterator *iterator, void *context) {
-  // System-injected button event: sent directly by PebbleOS firmware (not PKJS) when a
-  // long-press of UP targets this watchface instead of launching another app -- see PROTOCOL.md.
-  // The firmware serializes the button ID as a UInt32 (TupletInteger on a uint32_t), so this must
-  // be read via ->value->uint32, not ->value->uint8 (same class of bug as TapThresholdMg et al
-  // below -- reading the wrong width silently reads back nonsense for anything past 255, though
-  // for these small values it happens to work out by coincidence, so don't copy the shortcut).
-  Tuple *button_event_tuple = dict_find(iterator, SYSTEM_MESSAGE_KEY_BUTTON_EVENT);
-  if (button_event_tuple) {
-    switch (button_event_tuple->value->uint32) {
-      case BUTTON_ID_UP:
-        prv_advance_panel();
-        break;
-      case BUTTON_ID_SELECT:
-        prv_advance_page();
-        break;
-      default:
-        break;
-    }
-    return;
-  }
-
   bool handled_setting = false;
 
   Tuple *show_battery_tuple = dict_find(iterator, MESSAGE_KEY_ShowBattery);
@@ -367,6 +413,32 @@ static void prv_inbox_received_handler(DictionaryIterator *iterator, void *conte
     }
     handled_setting = true;
   }
+
+#ifdef PBL_CAPABILITY_QUICK_LAUNCH_BUTTON_SERVICE
+  // Clay's "select" component always sends its value as a decimal-digit string (see config.js),
+  // unlike the slider fields below which arrive as real int32s -- read via ->value->cstring, not
+  // ->value->int32. Out-of-range values (a mismatched/stale config.js, say) are ignored rather
+  // than stored, leaving whatever was previously in effect.
+  Tuple *panel_rotation_event_tuple = dict_find(iterator, MESSAGE_KEY_PanelRotationEvent);
+  if (panel_rotation_event_tuple) {
+    int value = atoi(panel_rotation_event_tuple->value->cstring);
+    if (value >= QUICK_LAUNCH_ROTATION_EVENT_NONE && value <= QUICK_LAUNCH_ROTATION_EVENT_HOLD_BACK) {
+      s_panel_rotation_event = (QuickLaunchRotationEvent)value;
+      persist_write_int(PERSIST_KEY_PANEL_ROTATION_EVENT, s_panel_rotation_event);
+    }
+    handled_setting = true;
+  }
+
+  Tuple *page_rotation_event_tuple = dict_find(iterator, MESSAGE_KEY_PageRotationEvent);
+  if (page_rotation_event_tuple) {
+    int value = atoi(page_rotation_event_tuple->value->cstring);
+    if (value >= QUICK_LAUNCH_ROTATION_EVENT_NONE && value <= QUICK_LAUNCH_ROTATION_EVENT_HOLD_BACK) {
+      s_page_rotation_event = (QuickLaunchRotationEvent)value;
+      persist_write_int(PERSIST_KEY_PAGE_ROTATION_EVENT, s_page_rotation_event);
+    }
+    handled_setting = true;
+  }
+#endif  // PBL_CAPABILITY_QUICK_LAUNCH_BUTTON_SERVICE
 
   Tuple *tap_axis_x_tuple = dict_find(iterator, MESSAGE_KEY_TapAxisX);
   if (tap_axis_x_tuple) {
@@ -1425,6 +1497,20 @@ static void prv_init(void) {
   if (persist_exists(PERSIST_KEY_ENABLE_ACCEL_TAPS)) {
     s_enable_accel_taps = persist_read_bool(PERSIST_KEY_ENABLE_ACCEL_TAPS);
   }
+#ifdef PBL_CAPABILITY_QUICK_LAUNCH_BUTTON_SERVICE
+  if (persist_exists(PERSIST_KEY_PANEL_ROTATION_EVENT)) {
+    int value = persist_read_int(PERSIST_KEY_PANEL_ROTATION_EVENT);
+    if (value >= QUICK_LAUNCH_ROTATION_EVENT_NONE && value <= QUICK_LAUNCH_ROTATION_EVENT_HOLD_BACK) {
+      s_panel_rotation_event = (QuickLaunchRotationEvent)value;
+    }
+  }
+  if (persist_exists(PERSIST_KEY_PAGE_ROTATION_EVENT)) {
+    int value = persist_read_int(PERSIST_KEY_PAGE_ROTATION_EVENT);
+    if (value >= QUICK_LAUNCH_ROTATION_EVENT_NONE && value <= QUICK_LAUNCH_ROTATION_EVENT_HOLD_BACK) {
+      s_page_rotation_event = (QuickLaunchRotationEvent)value;
+    }
+  }
+#endif  // PBL_CAPABILITY_QUICK_LAUNCH_BUTTON_SERVICE
   prv_recompute_tap_params();
 
   s_window = window_create();
@@ -1455,6 +1541,13 @@ static void prv_init(void) {
   tick_timer_service_subscribe(MINUTE_UNIT, prv_tick_handler);
   prv_update_time();
 
+#ifdef PBL_CAPABILITY_QUICK_LAUNCH_BUTTON_SERVICE
+  // Independent of (and additional to) the wrist-tap gestures below: fires only when a
+  // quick-launch button is explicitly configured, in Settings, to target this watchface -- see
+  // prv_quick_launch_button_handler.
+  quick_launch_button_service_subscribe(prv_quick_launch_button_handler);
+#endif
+
   // Watchfaces get no touch or button input; a wrist tap is the only
   // gesture available, so it drives both info-feed pagination (triple tap)
   // and panel rotation (quadruple tap) -- see the comment above
@@ -1474,6 +1567,9 @@ static void prv_deinit(void) {
   battery_state_service_unsubscribe();
   connection_service_unsubscribe();
   tick_timer_service_unsubscribe();
+#ifdef PBL_CAPABILITY_QUICK_LAUNCH_BUTTON_SERVICE
+  quick_launch_button_service_unsubscribe();
+#endif
   window_destroy(s_window);
 }
 

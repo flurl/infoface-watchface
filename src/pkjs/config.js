@@ -2,6 +2,20 @@
 // See https://developer.repebble.com/guides/user-interfaces/app-configuration/
 var defaults = require('./config-defaults');
 
+// Shared by both quick-launch-event dropdowns below. Values are this watchface's own encoding
+// (QuickLaunchRotationEvent in info-watchface.c) -- Clay's "select" always sends its value as a
+// string, and only ButtonId UP/DOWN support a short tap; SELECT/BACK only ever reach the watch on
+// a hold (see PROTOCOL.md), so there's no "Select (tap)"/"Back (tap)" option to offer.
+var QUICK_LAUNCH_EVENT_OPTIONS = [
+  { "label": "None", "value": "0" },
+  { "label": "Up (tap)", "value": "1" },
+  { "label": "Down (tap)", "value": "2" },
+  { "label": "Up (hold)", "value": "3" },
+  { "label": "Down (hold)", "value": "4" },
+  { "label": "Select (hold)", "value": "5" },
+  { "label": "Back (hold)", "value": "6" }
+];
+
 module.exports = [
   {
     "type": "heading",
@@ -113,6 +127,28 @@ module.exports = [
     "max": 1500,
     "step": 20,
     "defaultValue": 400
+  },
+  {
+    "type": "heading",
+    "defaultValue": "Quick Launch Buttons"
+  },
+  {
+    "type": "text",
+    "defaultValue": "Requires this project's own modified PebbleOS firmware -- has no effect on stock/unmodified firmware. Independent of the wrist-tap gestures above: pick a button (configured as a quick-launch target for this watchface in the on-watch Settings app) to also trigger panel or page rotation directly, without needing a tap gesture at all."
+  },
+  {
+    "type": "select",
+    "messageKey": "PanelRotationEvent",
+    "label": "Panel Rotation Event",
+    "defaultValue": "0",
+    "options": QUICK_LAUNCH_EVENT_OPTIONS
+  },
+  {
+    "type": "select",
+    "messageKey": "PageRotationEvent",
+    "label": "Page Rotation Event",
+    "defaultValue": "0",
+    "options": QUICK_LAUNCH_EVENT_OPTIONS
   },
   {
     "type": "submit",

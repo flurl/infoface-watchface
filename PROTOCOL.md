@@ -133,15 +133,17 @@ Current build (`build/js/message_keys.json` on the VM, 2026-07-14):
 | `PanelIndex`    | `10017`    | UInt8       | 0-based, `< PanelCount`; absent ⇒ `0` (back-compat with a v2-only sender) |
 | `PanelTitle`    | `10018`    | cstring     | ≤ 15 chars + NUL (`char title[16]`); optional, empty ⇒ no header label |
 | `EnableAccelTaps` | `10019` | UInt8 | `0` or `1`, default `1` (master switch, see "Page-turn tap gesture" below) |
+| `PanelRotationEvent` | `10020` | cstring (`"0"`–`"6"`) | Clay `select`, default `"0"` (see "Quick-launch-button rotation" below) |
+| `PageRotationEvent` | `10021` | cstring (`"0"`–`"6"`) | Clay `select`, default `"0"` (see "Quick-launch-button rotation" below) |
 
 `MAX_INFO_ITEMS = 8` (per-panel buffer cap) and `MAX_PANELS = 4` (watchface-side, both in
 `src/c/info-watchface.c`).
 
 **Note on key IDs:** these are assigned by declaration order in `package.json`'s
 `pebble.messageKeys`, starting at 10000 — `PanelCount`/`PanelIndex`/`PanelTitle` (and later,
-`EnableAccelTaps`) were **appended** to the end of that list rather than inserted alongside the
-related `ItemCount`/`ItemIndex`/`EnablePagination`/etc., so every existing ID stays stable. Don't
-reorder this list without re-checking every ID above.
+`EnableAccelTaps`, `PanelRotationEvent`, `PageRotationEvent`) were **appended** to the end of that
+list rather than inserted alongside the related `ItemCount`/`ItemIndex`/`EnablePagination`/etc.,
+so every existing ID stays stable. Don't reorder this list without re-checking every ID above.
 
 ## Watch settings (Clay)
 
@@ -188,32 +190,48 @@ sends the settings dict over the **same** `AppMessage` inbox as calendar sync �
   `localStorage['clay-settings']` (`getServerUrl()`), not from AppMessage — see
   "PebbleKit JS" above.
 
-### System button events
+### Quick-launch-button rotation
 
-The rest of this file documents keys declared in `package.json`'s `pebble.messageKeys`, which the
-Pebble build tool auto-assigns `uint32` IDs starting at **10000**, always sent by PKJS or the
-companion app. `ButtonEvent` is the one exception to both halves of that: it's a **plain numeric
-`#define`, not declared in `package.json`**, using key **`9999`** — deliberately below 10000, a
-range reserved for future system-injected messages like it — and it's sent by neither PKJS nor the
-companion app. Instead, PebbleOS firmware itself (`shell/normal/watchface.c`'s
-`prv_notify_if_running_watchface`, called from both `prv_quick_launch_handler` (long-press/"Hold X"
-quick-launch settings) and `prv_launch_up_down` (short tap/"Tap Up"/"Tap Down" settings), in the
-`coredevices/pebbleos` fork) writes it directly into this watchface's own AppMessage inbox,
-bypassing Bluetooth/PKJS entirely, whenever a button's configured quick-launch target (set from the
-watch's own Settings → Quick Launch screen) resolves to the watchface that's currently running —
-instead of the ordinary self-launch, which would otherwise just no-op. See that fork's firmware-side
-documentation for the injection mechanism; from this watchface's side it's an ordinary inbound
-AppMessage, indistinguishable on the wire from anything PKJS could send.
+**This entire section only applies when building against an SDK generated from this project's own
+modified PebbleOS fork (`coredevices/pebbleos` + the `quick_launch_button_service` addition) — it
+has no effect, and needs no watchface-side changes to keep building cleanly, against a
+stock/unmodified Pebble SDK.** The watchface's C code guards every use of this feature with
+`#ifdef PBL_CAPABILITY_QUICK_LAUNCH_BUTTON_SERVICE`, a macro that such an SDK's generated
+`pebble.h` defines (to `1`) and a stock SDK simply doesn't define at all — so the same
+`src/c/info-watchface.c` source builds either way, with the feature compiled out entirely on stock
+firmware rather than failing to build or misbehaving at runtime.
 
-- **`ButtonEvent`** (key `9999`, **UInt32** — not UInt8; the firmware serializes a `ButtonId` via
-  `TupletInteger` on a `uint32_t`, so the C handler must read `->value->uint32`): the `ButtonId`
-  that triggered the notification. `1` (`BUTTON_ID_UP`) rotates to the next info panel
-  (`prv_advance_panel()`); `2` (`BUTTON_ID_SELECT`) turns to the next page within the current panel
-  (`prv_advance_page()`, a no-op unless `EnablePagination` is on); other values (`0`=BACK, `3`=DOWN)
-  are received but ignored by this watchface today. Which button actually triggers a `ButtonEvent`
-  is fully user-configurable on the firmware side (any Quick Launch tap/hold slot can be pointed at
-  a watchface, not just UP) — no watchface-side changes needed to support more buttons, only the
-  `switch` above needs new cases if UP/SELECT stop being the only ones worth reacting to.
+Earlier versions of this watchface received quick-launch button presses via a firmware-injected
+AppMessage on a reserved key (`9999`, below the normal `>= 10000` range). That mechanism has been
+replaced: PebbleOS firmware (`shell/normal/watchface.c`'s `prv_notify_if_running_watchface`, called
+from `prv_quick_launch_handler` for long-press/"Hold X" quick-launch settings and
+`prv_launch_up_down` for short-tap/"Tap Up"/"Tap Down" settings) now delivers a native
+`PEBBLE_QUICK_LAUNCH_BUTTON_EVENT` kernel event straight to the app task, and the watchface
+subscribes to it via the applib-level `quick_launch_button_service_subscribe()` — this never
+touches AppMessage/PKJS/Bluetooth at all, so there's no shared key-number namespace with anything
+PKJS or the phone could send, and it works even though this watchface's AppMessage inbox is
+otherwise entirely a phone-communication channel. See that fork's firmware-side documentation
+(`applib/quick_launch_button_service.h`) for the kernel-side mechanism.
+
+Only four (button, press-type) combinations can ever reach a watchface this way, matching
+`shell/normal/watchface.c`'s click config: `BUTTON_ID_UP`/`BUTTON_ID_DOWN` support both a short tap
+("Tap Up"/"Tap Down" quick-launch slots) and a long hold ("Hold Up"/"Hold Down"), while
+`BUTTON_ID_SELECT`/`BUTTON_ID_BACK` only ever reach here on a hold ("Hold Select"/"Hold Back") — a
+short press of either is always claimed by the system first (launcher shortcut / dismiss timeline
+peek, respectively), never delivered to a running watchface.
+
+This watchface exposes two **independent** Clay dropdowns, **`PanelRotationEvent`** and
+**`PageRotationEvent`** (see the message-keys table above), each picking one of those six
+combinations (or "None") to trigger `prv_advance_panel()` / `prv_advance_page()` respectively —
+so, for example, "Hold Select" could rotate panels while "Tap Up" turns pages, or the same event
+could drive both, independent of (and in addition to) the wrist-tap gestures below. Both default
+to `"0"` (None/disabled), so a fresh install behaves exactly as if this feature didn't exist until
+explicitly configured. Values are sent by Clay as decimal-digit **strings**, not real integers
+(`select` always serializes to a string — unlike the Clay `slider` fields elsewhere in this file,
+which do arrive as real `Int32`s), read via `->value->cstring` and parsed with `atoi()`; the
+encoding (`0`=None, `1`=Up tap, `2`=Down tap, `3`=Up hold, `4`=Down hold, `5`=Select hold, `6`=Back
+hold — `QuickLaunchRotationEvent` in `src/c/info-watchface.c`) is this watchface's own and
+unrelated to PebbleOS's internal `ButtonId` numbering.
 
 ### Page-turn tap gesture
 
@@ -221,8 +239,8 @@ Pagination itself is off by default — see **`EnablePagination`** below — and
 section only matters while it's on.
 
 The watchface has no *direct* touch or button input (touch is reserved for watchapps; the system
-shell owns all buttons on a watchface — with the one narrow exception, `ButtonEvent`, described
-just above — see `src/c/info-watchface.c`'s comment above
+shell owns all buttons on a watchface — with the one narrow exception of quick-launch-configured
+buttons, described just above — see `src/c/info-watchface.c`'s comment above
 `prv_accel_data_handler`), so the info feed's page turns are driven by a hand-rolled
 accelerometer jolt detector (`accel_data_service_subscribe()`, **not**
 `accel_tap_service_subscribe()` — the latter is fed by the system's shared "Motion Sensitivity"
