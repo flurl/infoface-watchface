@@ -1052,9 +1052,55 @@ static void prv_update_accel_subscription(void) {
   }
 }
 
-// Battery icon: outline + a fill bar proportional to charge, red when
-// charge is low (<=20%) and not charging, plus a small lightning bolt
-// overlay while charging/plugged in.
+// Charging fill-climb animation for the battery icon (see
+// prv_battery_update_proc): a 1fps timer-driven phase that climbs
+// 0% -> 25% -> 50% -> 75% -> 100%, one step per second, stopping at
+// whichever quartile contains the real charge level before looping back to
+// 0% and climbing again -- only running while actually charging/plugged in,
+// so it costs nothing off the charger.
+//
+// BATTERY_CHARGE_ANIM_STEPS (60) is a wraparound bound for the raw phase
+// counter, not the number of visible frames -- it's the LCM of the possible
+// per-bracket cycle lengths (2/3/4/5, see prv_battery_update_proc), chosen
+// so phase % (bracket_step + 1) always lands on a clean 0..bracket_step
+// cycle regardless of when the raw counter itself wraps.
+#define BATTERY_CHARGE_ANIM_STEPS 60
+#define BATTERY_CHARGE_ANIM_INTERVAL_MS 1000
+static AppTimer *s_battery_anim_timer = NULL;
+static int s_battery_anim_phase = 0;
+static bool s_battery_was_charging = false;
+
+static void prv_battery_anim_timer_callback(void *data) {
+  s_battery_anim_phase = (s_battery_anim_phase + 1) % BATTERY_CHARGE_ANIM_STEPS;
+  layer_mark_dirty(s_battery_layer);
+  s_battery_anim_timer = app_timer_register(BATTERY_CHARGE_ANIM_INTERVAL_MS,
+                                             prv_battery_anim_timer_callback, NULL);
+}
+
+// Starts/stops the pulse timer on charging-state transitions; a no-op if
+// `charging` matches the current state already.
+static void prv_battery_set_charging_anim(bool charging) {
+  if (charging == s_battery_was_charging) {
+    return;
+  }
+  s_battery_was_charging = charging;
+  if (charging) {
+    s_battery_anim_phase = 0;
+    s_battery_anim_timer = app_timer_register(BATTERY_CHARGE_ANIM_INTERVAL_MS,
+                                               prv_battery_anim_timer_callback, NULL);
+  } else if (s_battery_anim_timer) {
+    app_timer_cancel(s_battery_anim_timer);
+    s_battery_anim_timer = NULL;
+  }
+}
+
+// Battery icon: outline + a fill bar. Not charging: fill proportional to the
+// real charge, red when low (<=20%). Charging and not yet full: fill climbs
+// at 1fps through 0% -> 25% -> 50% -> 75% -> whichever of those is the top
+// of the quartile bracket containing the real charge, then loops back to 0%
+// and climbs again -- e.g. at 40% (25-50% bracket) the sequence is
+// 0, 25, 50, 0, 25, 50, ... Charging and full (100%): static, solid green
+// fill, no more animation since there's nothing left to indicate.
 static void prv_battery_update_proc(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
 
@@ -1077,10 +1123,25 @@ static void prv_battery_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, GColorWhite);
   graphics_fill_rect(ctx, nub_rect, 0, GCornerNone);
 
-  // Fill inset 2px inside the outline, width proportional to charge.
+  int display_percent;
+  GColor fill_color;
+  if (!charging) {
+    display_percent = percent;
+    fill_color = (percent <= 20) ? GColorRed : GColorWhite;
+  } else if (percent >= 100) {
+    display_percent = 100;
+    fill_color = GColorGreen;
+  } else {
+    int bracket_step = (percent <= 25) ? 1 : (percent <= 50) ? 2 : (percent <= 75) ? 3 : 4;
+    int frame_index = s_battery_anim_phase % (bracket_step + 1);
+    display_percent = frame_index * 25;
+    fill_color = GColorWhite;
+  }
+
+  // Fill inset 2px inside the outline, width proportional to display_percent.
   const int pad = 2;
   int fill_max_w = body_w - 2 * pad;
-  int fill_w = (fill_max_w * percent) / 100;
+  int fill_w = (fill_max_w * display_percent) / 100;
   if (fill_w < 0) {
     fill_w = 0;
   }
@@ -1088,33 +1149,14 @@ static void prv_battery_update_proc(Layer *layer, GContext *ctx) {
     fill_w = fill_max_w;
   }
 
-  GColor fill_color = (percent <= 20 && !charging) ? GColorRed : GColorWhite;
   graphics_context_set_fill_color(ctx, fill_color);
   if (fill_w > 0) {
     graphics_fill_rect(ctx, GRect(body_x + pad, body_y + pad, fill_w, body_h - 2 * pad), 0, GCornerNone);
   }
-
-  if (charging) {
-    GPoint bolt_points[] = {
-      {body_x + 12, body_y + 1},
-      {body_x + 7, body_y + 8},
-      {body_x + 11, body_y + 8},
-      {body_x + 8, body_y + 12},
-      {body_x + 15, body_y + 5},
-      {body_x + 11, body_y + 5},
-    };
-    GPathInfo bolt_info = {
-      .num_points = 6,
-      .points = bolt_points,
-    };
-    GPath *bolt_path = gpath_create(&bolt_info);
-    graphics_context_set_fill_color(ctx, GColorBlack);
-    gpath_draw_filled(ctx, bolt_path);
-    gpath_destroy(bolt_path);
-  }
 }
 
 static void prv_battery_handler(BatteryChargeState charge) {
+  prv_battery_set_charging_anim(charge.is_charging || charge.is_plugged);
   layer_mark_dirty(s_battery_layer);
 }
 
@@ -1371,6 +1413,8 @@ static void prv_init(void) {
   app_message_open(app_message_inbox_size_maximum(), app_message_outbox_size_maximum());
 
   battery_state_service_subscribe(prv_battery_handler);
+  BatteryChargeState initial_battery = battery_state_service_peek();
+  prv_battery_set_charging_anim(initial_battery.is_charging || initial_battery.is_plugged);
 
   // Seed the connection tracker without buzzing. The icon itself renders from
   // a live peek in prv_bluetooth_should_show(), so the first window draw is
@@ -1395,6 +1439,10 @@ static void prv_init(void) {
 static void prv_deinit(void) {
   if (s_accel_subscribed) {
     prv_unsubscribe_accel();
+  }
+  if (s_battery_anim_timer) {
+    app_timer_cancel(s_battery_anim_timer);
+    s_battery_anim_timer = NULL;
   }
   battery_state_service_unsubscribe();
   connection_service_unsubscribe();
