@@ -62,6 +62,7 @@ static char s_date_buf[24];
 #define PERSIST_KEY_TAP_RINGDOWN_MS 24
 #define PERSIST_KEY_TAP_MULTI_TAP_WINDOW_MS 25
 #define PERSIST_KEY_ENABLE_PAGINATION 26
+#define PERSIST_KEY_ENABLE_ACCEL_TAPS 27
 static bool s_show_battery = true;
 static bool s_show_quiet_time = true;
 static bool s_show_bluetooth_alert = true;
@@ -73,6 +74,14 @@ static bool s_show_bluetooth_alert = true;
 // panel rotation (quadruple tap) needs the accelerometer too, independently
 // of pagination.
 static bool s_enable_pagination = false;
+
+// Overall master switch for wrist-tap gestures (both the triple-tap page
+// turn and the quadruple-tap panel rotation). On by default. See
+// prv_update_accel_subscription() -- unlike s_enable_pagination and
+// s_panel_count, which OR together to decide whether taps can currently do
+// anything, this ANDs in ahead of that: off means the accelerometer is
+// never subscribed to no matter what pagination/panel state says.
+static bool s_enable_accel_taps = true;
 
 // Tap-recognition parameters, tunable at runtime from the Clay settings page
 // (see PROTOCOL.md) so they can be tweaked without recompiling. See
@@ -275,7 +284,8 @@ static void prv_advance_panel(void);
 // in one of these shapes:
 //   - {ButtonEvent: <ButtonId>}                                     -- system-injected, see above
 //   - {ShowBattery: 0|1, ShowQuietTime: 0|1, ShowBluetooth: 0|1, EnablePagination: 0|1,
-//      TapAxisX/Y/Z: 0|1, TapThresholdMg/TapRingdownMs/TapMultiTapWindowMs: N,
+//      EnableAccelTaps: 0|1, TapAxisX/Y/Z: 0|1,
+//      TapThresholdMg/TapRingdownMs/TapMultiTapWindowMs: N,
 //      ServerUrl: "..."} (any subset) -- from the Clay settings page, all
 //      changed fields in one message
 //   - {PanelCount: P}                                              -- resets all panels
@@ -343,6 +353,17 @@ static void prv_inbox_received_handler(DictionaryIterator *iterator, void *conte
       }
       prv_update_accel_subscription();
       layer_mark_dirty(s_info_layer);
+    }
+    handled_setting = true;
+  }
+
+  Tuple *enable_accel_taps_tuple = dict_find(iterator, MESSAGE_KEY_EnableAccelTaps);
+  if (enable_accel_taps_tuple) {
+    bool new_value = enable_accel_taps_tuple->value->uint8 != 0;
+    if (new_value != s_enable_accel_taps) {
+      s_enable_accel_taps = new_value;
+      persist_write_bool(PERSIST_KEY_ENABLE_ACCEL_TAPS, s_enable_accel_taps);
+      prv_update_accel_subscription();
     }
     handled_setting = true;
   }
@@ -1038,11 +1059,14 @@ static void prv_unsubscribe_accel(void) {
 // can currently do anything: pagination needs it for the triple-tap page
 // turn, and more than one active panel needs it for the quadruple-tap panel
 // rotation -- either alone is enough to justify the subscription (and its
-// battery cost), independently of the other. Safe to call redundantly (e.g.
-// from both the PanelCount and EnablePagination inbox branches in the same
-// settings save) since it only actually (un)subscribes on a real transition.
+// battery cost), independently of the other -- but s_enable_accel_taps is
+// the overall master switch, checked first: off means the accelerometer is
+// never subscribed regardless of pagination/panel state. Safe to call
+// redundantly (e.g. from both the PanelCount and EnablePagination inbox
+// branches in the same settings save) since it only actually (un)subscribes
+// on a real transition.
 static void prv_update_accel_subscription(void) {
-  bool should_subscribe = s_enable_pagination || s_panel_count > 1;
+  bool should_subscribe = s_enable_accel_taps && (s_enable_pagination || s_panel_count > 1);
   if (should_subscribe && !s_accel_subscribed) {
     prv_subscribe_accel();
     s_accel_subscribed = true;
@@ -1397,6 +1421,9 @@ static void prv_init(void) {
   }
   if (persist_exists(PERSIST_KEY_ENABLE_PAGINATION)) {
     s_enable_pagination = persist_read_bool(PERSIST_KEY_ENABLE_PAGINATION);
+  }
+  if (persist_exists(PERSIST_KEY_ENABLE_ACCEL_TAPS)) {
+    s_enable_accel_taps = persist_read_bool(PERSIST_KEY_ENABLE_ACCEL_TAPS);
   }
   prv_recompute_tap_params();
 

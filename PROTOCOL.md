@@ -132,14 +132,16 @@ Current build (`build/js/message_keys.json` on the VM, 2026-07-14):
 | `PanelCount`    | `10016`    | UInt8       | 0–4 (see `MAX_PANELS`), master reset for the whole panel set |
 | `PanelIndex`    | `10017`    | UInt8       | 0-based, `< PanelCount`; absent ⇒ `0` (back-compat with a v2-only sender) |
 | `PanelTitle`    | `10018`    | cstring     | ≤ 15 chars + NUL (`char title[16]`); optional, empty ⇒ no header label |
+| `EnableAccelTaps` | `10019` | UInt8 | `0` or `1`, default `1` (master switch, see "Page-turn tap gesture" below) |
 
 `MAX_INFO_ITEMS = 8` (per-panel buffer cap) and `MAX_PANELS = 4` (watchface-side, both in
 `src/c/info-watchface.c`).
 
 **Note on key IDs:** these are assigned by declaration order in `package.json`'s
-`pebble.messageKeys`, starting at 10000 — `PanelCount`/`PanelIndex`/`PanelTitle` were **appended**
-to the end of that list rather than inserted alongside the related `ItemCount`/`ItemIndex`/etc., so
-every existing ID stays stable. Don't reorder this list without re-checking every ID above.
+`pebble.messageKeys`, starting at 10000 — `PanelCount`/`PanelIndex`/`PanelTitle` (and later,
+`EnableAccelTaps`) were **appended** to the end of that list rather than inserted alongside the
+related `ItemCount`/`ItemIndex`/`EnablePagination`/etc., so every existing ID stays stable. Don't
+reorder this list without re-checking every ID above.
 
 ## Watch settings (Clay)
 
@@ -231,6 +233,15 @@ new jolt; the sequence's final tap count then decides whether to act (exactly 3)
 (anything else, including 1, 2, or 4+). All of the detector's parameters are exposed as Clay
 settings so they can be tuned from the phone without recompiling:
 
+- **`EnableAccelTaps`** (`0`/`1`, default `1`): the overall master switch for wrist-tap gestures
+  -- both the triple-tap page turn described in this section and the quadruple-tap panel
+  rotation described in "Info panels" below. **On** (the default): behaves exactly as documented
+  in the rest of this section. **Off**: the accelerometer is never subscribed to at all, no
+  matter what `EnablePagination` or the panel count say -- `prv_update_accel_subscription()`'s
+  `should_subscribe` ANDs this in ahead of the existing `EnablePagination || panel_count > 1` OR,
+  rather than being another term of it. Both gestures stop working immediately on toggling this
+  off, and there's no tap-detection battery cost at all while it's off. Persisted under
+  `PERSIST_KEY_ENABLE_ACCEL_TAPS` (`27`).
 - **`EnablePagination`** (`0`/`1`, default `0`): master switch for the whole feature. **Off**
   (the default): the info feed shows only as many events as fit on one screen — same
   hard-truncation behavior as before pagination existed — with no page indicator, and the
@@ -260,7 +271,7 @@ settings so they can be tuned from the phone without recompiling:
   above `TapRingdownMs` or a deliberate next tap could be swallowed by the ringdown debounce
   instead of being recognized. Persisted under `PERSIST_KEY_TAP_MULTI_TAP_WINDOW_MS` (`25`).
 
-All seven are read/written in `prv_inbox_received_handler()`/`prv_init()` alongside the other Clay
+All eight are read/written in `prv_inbox_received_handler()`/`prv_init()` alongside the other Clay
 settings (same "any subset, independent `if` per key" pattern — see "Inbox handler contract"
 below); the three numeric fields are recomputed into their derived sample-count form by
 `prv_recompute_tap_params()` on load and on every settings save that touches one of them.
@@ -304,10 +315,11 @@ discarded, same as before.
 
 Panel rotation does **not** depend on `EnablePagination` — it works whether pagination is on or off,
 since it's a different axis (which source you're looking at) than pagination (which page of that
-source you're on). Consequently the accelerometer is now subscribed whenever **either**
-`EnablePagination` is on **or** more than one panel is active (`prv_update_accel_subscription()`,
-called from `prv_init()` and from both the `EnablePagination` and `PanelCount` inbox branches) —
-previously it was gated on `EnablePagination` alone.
+source you're on). Consequently the accelerometer is subscribed whenever `EnableAccelTaps` is on
+**and** **either** `EnablePagination` is on **or** more than one panel is active
+(`prv_update_accel_subscription()`, called from `prv_init()` and from the `EnableAccelTaps`,
+`EnablePagination`, and `PanelCount` inbox branches) — previously (before `EnableAccelTaps` existed)
+it was gated on `EnablePagination` alone.
 
 **Panel header / indicator:** rather than adding a separate row of dots for "which panel," the
 existing plain divider line at the top of the info area doubles as the indicator. If the current

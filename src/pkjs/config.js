@@ -53,8 +53,15 @@ module.exports = [
     "defaultValue": "Wrist Tap Gestures"
   },
   {
+    "type": "toggle",
+    "messageKey": "EnableAccelTaps",
+    "label": "Use Accelerometer Taps for Input",
+    "description": "Master switch for all wrist-tap gestures. A TRIPLE tap on the watch turns the info-feed page (only relevant when Enable Pagination, above, is on); a QUADRUPLE tap rotates to the next info panel (Events, Weather, ...) -- this works regardless of the Enable Pagination setting. Single and double taps are always ignored. On by default. Turn this off to disable both gestures and switch the accelerometer off completely -- no tap detection, no battery cost from it -- even if pagination is on or multiple panels are configured.",
+    "defaultValue": true
+  },
+  {
     "type": "text",
-    "defaultValue": "A TRIPLE tap on the watch turns the info-feed page (only relevant when Enable Pagination, above, is on). A QUADRUPLE tap rotates to the next info panel (Events, Weather, ...) -- this works regardless of the Enable Pagination setting. Single and double taps are ignored either way. These controls tune how ALL taps are detected -- see PROTOCOL.md for the full explanation of each one."
+    "defaultValue": "The settings below tune how taps are detected while the switch above is on -- see PROTOCOL.md for the full explanation of each one."
   },
   {
     "type": "toggle",
