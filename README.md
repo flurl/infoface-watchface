@@ -72,14 +72,36 @@ pebble install --cloudpebble            # via CloudPebble relay, no Wi-Fi needed
 pebble install --emulator emery         # QEMU emulator, for development
 ```
 
+## Testing without a phone
+
+[`scripts/send-test-panels.sh`](scripts/send-test-panels.sh) sends a fixed set of test panels
+(Events with several items + a divider, Weather, two-line Feed items) straight to a running
+emulator or watch via `pebble send-app-message`, bypassing PKJS and the companion app entirely
+— useful for checking rendering without a phone in the loop:
+
+```sh
+pebble install --emulator gabbro        # or emery / flint
+./scripts/send-test-panels.sh           # defaults to --emulator gabbro
+./scripts/send-test-panels.sh --emulator emery
+./scripts/send-test-panels.sh --cloudpebble   # real hardware
+```
+
+**Gotcha:** `pebble send-app-message`'s `--uint`/`--string`/`--int` flags do **not** accumulate
+across repeated uses on one command line — each repeated flag *replaces* the previous one's
+values rather than adding to them, so e.g. `--uint 10017=0 --uint 10003=1` silently sends only
+`10003=1` (`10017` is dropped, no error). Put every key=value pair for the same AppMessage in
+one `--uint`/`--string` invocation as multiple space-separated args instead. Verify what's
+actually being sent with `-vvv` if a message seems to have no effect.
+
 ## Project layout
 
 ```
-src/c/info-watchface.c   C source — rendering, AppMessage inbox, button/tap gestures
-src/pkjs/index.js        PebbleKit JS — polls the companion app, relays to the watch
-src/pkjs/config.js       Settings screen (Clay)
-PROTOCOL.md              Wire-format contract with the companion app
-wscript                  waf build rules
+src/c/info-watchface.c          C source — rendering, AppMessage inbox, button/tap gestures
+src/pkjs/index.js               PebbleKit JS — polls the companion app, relays to the watch
+src/pkjs/config.js              Settings screen (Clay)
+scripts/send-test-panels.sh     Send test panel data directly, no phone needed (see above)
+PROTOCOL.md                     Wire-format contract with the companion app
+wscript                         waf build rules
 ```
 
 ## Protocol
