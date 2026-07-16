@@ -1,7 +1,7 @@
 {
-  "name": "info-watchface",
+  "name": "infoface",
   "author": "Florian Klug-Göri",
-  "version": "1.0.0",
+  "version": "0.9.0",
   "keywords": [
     "pebble-app"
   ],
@@ -10,7 +10,7 @@
     "@rebble/clay": "^1.0.10"
   },
   "pebble": {
-    "displayName": "Info",
+    "displayName": "Infoface",
     "uuid": "8047c3ec-ee69-418d-b0f1-3da7371aee63",
     "sdkVersion": "3",
     "enableMultiJS": true,
@@ -51,7 +51,7 @@
     },
     "companionApp": {
       "android": {
-        "url": "",
+        "url": "https://github.com/flurl/infoface-companion/releases/latest",
         "apps": [
           {
             "package": "family.dieflomis.infocompanion"
