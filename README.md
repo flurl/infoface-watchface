@@ -1,36 +1,93 @@
-# info-watchface
+# Infoface
 
-A Pebble watchapp/watchface written in C using the Pebble SDK.
+A Pebble watchface that shows a rotating set of **info panels** — calendar events, weather,
+RSS/Atom feeds, and generic JSON sources — fed live from its Android companion app,
+[**Infoface Companion**](https://github.com/flurl/infoface-companion). The watchface has no
+network access of its own; the companion app does all the fetching/parsing and hands the watch
+a small, pre-formatted feed over Bluetooth every 15 minutes.
 
-## Building & running
+Battery, quiet-time, and Bluetooth-disconnect indicators; optional pagination and
+quadruple/triple wrist-tap gestures to turn pages or rotate panels; all tunable from the watch's
+Settings screen (Clay) on the phone.
+
+**Requires the [Infoface Companion](https://github.com/flurl/infoface-companion) app** on your
+phone — the watchface shows "Nothing to see" without it.
+
+## Two builds
+
+This repo produces two `.pbw` variants from the same source, both built for **emery** (Pebble
+Time 2), **flint** (Pebble 2 Duo), and **gabbro** (Pebble Round 2):
+
+| Variant | Firmware needed | What you lose without it |
+|---|---|---|
+| **`infoface-<version>-stock.pbw`** | Any stock PebbleOS | Nothing — this is the one on the [Pebble appstore](https://apps.repebble.com). |
+| **`infoface-<version>-buttons.pbw`** | [flurl/PebbleOS](https://github.com/flurl/PebbleOS) (the `feature/watchface-button-notify` fork) | Quick-launch buttons (Up/Down/Select/Back, tap or hold) can rotate panels and turn pages in addition to the wrist-tap gestures. **Will not launch on stock firmware** — it links a firmware service that only exists in the fork. |
+
+Grab both from this repo's [Releases](../../releases) page. See
+[flurl/PebbleOS](https://github.com/flurl/PebbleOS) for what the fork changes and how to build
+and sideload it onto real hardware.
+
+## Building
+
+Requires [pebble-tool](https://github.com/pebble-dev/pebble-tool) (the repebble fork; the
+community-maintained one, not the frozen official `pebble-tool`).
+
+**Stock (no buttons) — builds against any normal Pebble SDK:**
 
 ```sh
-pebble build                          # build for all targetPlatforms
-pebble install --emulator emery       # install on the emery emulator
-pebble install --phone <ip>           # install to a paired phone
+pebble sdk activate 4.17   # or whichever stock SDK you have installed
+pebble build
 ```
 
-## Target platforms
+**Button variant — builds against an SDK exported from the [flurl/PebbleOS](https://github.com/flurl/PebbleOS) fork:**
 
-`targetPlatforms` in `package.json` controls which watches you build for. The
-modern Pebble hardware is **emery** (Pebble Time 2), **gabbro** (Pebble Round
-2), and **flint** (Pebble 2 Duo); the original Pebble platforms (aplite,
-basalt, chalk, diorite) are included by default for backwards compatibility.
+The watchface's C code guards every button-related call with
+`#ifdef PBL_CAPABILITY_QUICK_LAUNCH_BUTTON_SERVICE`, a macro that only a `pebble.h` generated
+from that fork's build defines — so the same source compiles either way, with the feature
+present or silently compiled out depending on which SDK is active.
+
+```sh
+# In a checkout of flurl/PebbleOS, on branch feature/watchface-button-notify:
+./pbl configure --board=obelix@pvt   # or your target board
+./waf build                          # also exports an app SDK to build/sdk/<platform>/
+
+# Register that exported SDK with pebble-tool as a local SDK named "tintin"
+# (re-run the install step after any firmware rebuild to refresh it):
+pebble sdk uninstall tintin --keep-data   # if already installed
+pebble sdk install --tintin /path/to/PebbleOS
+
+# Then, back in this repo:
+pebble sdk activate tintin
+pebble build
+```
+
+Output lands in `build/<platform>/pebble-app.pbw` for each platform, bundled into a single
+`build/infoface.pbw`.
+
+## Installing
+
+```sh
+pebble install --phone <phone-ip>       # over the same Wi-Fi network
+pebble install --cloudpebble            # via CloudPebble relay, no Wi-Fi needed
+pebble install --emulator emery         # QEMU emulator, for development
+```
 
 ## Project layout
 
 ```
-src/c/           C source for the watchapp
-src/pkjs/        PebbleKit JS (phone-side) source, if any
-worker_src/c/    Background worker source, if any
-resources/       Images, fonts, and other bundled resources
-package.json     Project metadata (UUID, platforms, resources, message keys)
-wscript          Build rules — usually no need to edit
+src/c/info-watchface.c   C source — rendering, AppMessage inbox, button/tap gestures
+src/pkjs/index.js        PebbleKit JS — polls the companion app, relays to the watch
+src/pkjs/config.js       Settings screen (Clay)
+PROTOCOL.md              Wire-format contract with the companion app
+wscript                  waf build rules
 ```
 
-By default this project is configured as a watchapp. To make it a watchface,
-set `pebble.watchapp.watchface` to `true` in `package.json`.
+## Protocol
 
-## Documentation
+See [`PROTOCOL.md`](PROTOCOL.md) for the full wire format between this watchface, its
+PebbleKit JS bridge, and the companion app — message keys, panel/item shapes, and why the data
+path goes through PKJS rather than the companion app talking to the watch directly.
 
-Full SDK docs, tutorials, and API reference: <https://developer.repebble.com>
+## License
+
+[GPL-3.0](LICENSE)
