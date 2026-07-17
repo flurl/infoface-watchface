@@ -21,10 +21,10 @@ Time 2), **flint** (Pebble 2 Duo), and **gabbro** (Pebble Round 2):
 | Variant | Firmware needed | What you lose without it |
 |---|---|---|
 | **`infoface-<version>-stock.pbw`** | Any stock PebbleOS | Nothing — this is the one on the [Pebble appstore](https://apps.repebble.com). |
-| **`infoface-<version>-buttons.pbw`** | [flurl/PebbleOS](https://github.com/flurl/PebbleOS) (the `feature/watchface-button-notify` fork) | Quick-launch buttons (Up/Down/Select/Back, tap or hold) can rotate panels and turn pages in addition to the wrist-tap gestures. **Will not launch on stock firmware** — it links a firmware service that only exists in the fork. |
+| **`infoface-<version>-buttons.pbw`** | [flurl/PebbleOS](https://github.com/flurl/PebbleOS/tree/feature/watchface-button-notify) (the `feature/watchface-button-notify` fork) | Quick-launch buttons (Up/Down/Select/Back, tap or hold) can rotate panels and turn pages in addition to the wrist-tap gestures. **Will not launch on stock firmware** — it links a firmware service that only exists in the fork. |
 
 Grab both from this repo's [Releases](../../releases) page. See
-[flurl/PebbleOS](https://github.com/flurl/PebbleOS) for what the fork changes and how to build
+[flurl/PebbleOS](https://github.com/flurl/PebbleOS/tree/feature/watchface-button-notify) for what the fork changes and how to build
 and sideload it onto real hardware.
 
 ## Building
@@ -39,7 +39,7 @@ pebble sdk activate 4.17   # or whichever stock SDK you have installed
 pebble build
 ```
 
-**Button variant — builds against an SDK exported from the [flurl/PebbleOS](https://github.com/flurl/PebbleOS) fork:**
+**Button variant — builds against an SDK exported from the [flurl/PebbleOS](https://github.com/flurl/PebbleOS/tree/feature/watchface-button-notify) fork:**
 
 The watchface's C code guards every button-related call with
 `#ifdef PBL_CAPABILITY_QUICK_LAUNCH_BUTTON_SERVICE`, a macro that only a `pebble.h` generated
