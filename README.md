@@ -93,6 +93,26 @@ values rather than adding to them, so e.g. `--uint 10017=0 --uint 10003=1` silen
 one `--uint`/`--string` invocation as multiple space-separated args instead. Verify what's
 actually being sent with `-vvv` if a message seems to have no effect.
 
+[`scripts/send-test-taps.sh`](scripts/send-test-taps.sh) simulates wrist-tap ("jolt") gestures on
+a running emulator by feeding synthetic accelerometer samples via `pebble emu-accel custom` —
+emulator only, no `--cloudpebble`/real-hardware option. The watchface counts however many jolts
+land within its multi-tap window as one gesture: 3 turns the page (if pagination is on), 4
+rotates to the next panel (if more than one panel is configured — see `send-test-panels.sh`
+above), other counts have no visible effect but are useful for exercising the detector itself:
+
+```sh
+pebble install --emulator gabbro                 # or emery / flint
+./scripts/send-test-taps.sh                      # 1 jolt, no visible effect, gabbro (default)
+./scripts/send-test-taps.sh 3                     # triple tap -> page turn
+./scripts/send-test-taps.sh 4 --emulator flint    # quadruple tap -> panel rotate, flint
+```
+
+**Gotcha:** `pebble emu-tap` does **not** work for this — it fires the OS's `accel_tap_service`
+event, which this watchface deliberately ignores in favor of watching raw accelerometer deltas
+for its own jolt threshold (see the block comment above `prv_accel_data_handler()` in
+`src/c/info-watchface.c`). Tap counts above ~30 will error out — `pebble-tool` caps a single
+`emu-accel` send at 255 samples.
+
 ## Project layout
 
 ```
@@ -100,6 +120,7 @@ src/c/info-watchface.c          C source — rendering, AppMessage inbox, button
 src/pkjs/index.js               PebbleKit JS — polls the companion app, relays to the watch
 src/pkjs/config.js              Settings screen (Clay)
 scripts/send-test-panels.sh     Send test panel data directly, no phone needed (see above)
+scripts/send-test-taps.sh       Simulate wrist-tap gestures on the emulator (see above)
 PROTOCOL.md                     Wire-format contract with the companion app
 wscript                         waf build rules
 ```
