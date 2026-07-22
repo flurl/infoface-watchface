@@ -1224,6 +1224,7 @@ static void prv_battery_update_proc(Layer *layer, GContext *ctx) {
   int percent = state.charge_percent;
   bool charging = state.is_charging || state.is_plugged;
 
+  // Outline body + a small nub on the right, classic battery-icon shape.
   const int body_w = 22;
   const int body_h = 13;
   const int nub_w = 2;
@@ -1239,22 +1240,31 @@ static void prv_battery_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, GColorWhite);
   graphics_fill_rect(ctx, nub_rect, 0, GCornerNone);
 
+  // Decide how full the fill bar should look (display_percent) and what
+  // color it should be, depending on charge state.
   int display_percent;
   GColor fill_color;
   if (!charging) {
+    // Not charging: fill matches the real charge, red when low.
     display_percent = percent;
     fill_color = (percent <= 20) ? GColorRed : GColorWhite;
   } else if (percent >= 100) {
+    // Charging and already full: static full green fill, no animation.
     display_percent = 100;
     fill_color = GColorGreen;
   } else {
+    // Charging and not yet full: climb 0% -> 25% -> ... up to the top of
+    // the quartile bracket containing the real charge, then loop back to
+    // 0% (see the BATTERY_CHARGE_ANIM_STEPS comment above for why looping
+    // works cleanly here regardless of when the raw phase counter wraps).
     int bracket_step = (percent <= 25) ? 1 : (percent <= 50) ? 2 : (percent <= 75) ? 3 : 4;
     int frame_index = s_battery_anim_phase % (bracket_step + 1);
     display_percent = frame_index * 25;
     fill_color = GColorWhite;
   }
 
-  // Fill inset 2px inside the outline, width proportional to display_percent.
+  // Fill inset 2px inside the outline, width proportional to display_percent,
+  // clamped so rounding can't push it outside the outline.
   const int pad = 2;
   int fill_max_w = body_w - 2 * pad;
   int fill_w = (fill_max_w * display_percent) / 100;
