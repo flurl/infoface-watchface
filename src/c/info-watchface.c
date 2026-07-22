@@ -216,6 +216,9 @@ static int s_panel_count = 0;
 static int s_panel = 0;
 static int s_page = 0;
 
+// Top inset before the first row, shared by prv_draw_rows and prv_page_end so
+// pagination always measures the same vertical space that gets drawn into.
+static const int ROWS_TOP_PADDING = 6;
 static const int ROW_HEIGHT = 22;
 static const int DIVIDER_ROW_HEIGHT = 12;
 // Height of a single line within a two-line feed row. Deliberately tighter than ROW_HEIGHT
@@ -625,7 +628,7 @@ static int prv_row_height(const InfoItem *item) {
 // within `height` pixels. Always admits at least one item (even if it alone
 // overflows `height`) so an oversized row can't stall pagination.
 static int prv_page_end(const InfoItem *items, int count, int start, int height) {
-  int y = 6;
+  int y = ROWS_TOP_PADDING;
   int i = start;
   while (i < count) {
     int row_h = prv_row_height(&items[i]);
@@ -831,13 +834,14 @@ static size_t prv_feed_line1_len(const char *text, GFont font, int narrow_w) {
   return last_fit;
 }
 
-// Draws items[start, end) top-anchored at y = y_offset + 6, at the given
-// width. Shared by both the paginated and non-paginated rendering paths in
-// prv_info_update_proc so they can't drift apart. `y_offset` is the height
-// already consumed above by prv_draw_panel_header (0 for an untitled panel).
+// Draws items[start, end) top-anchored at y = y_offset + ROWS_TOP_PADDING, at
+// the given width. Shared by both the paginated and non-paginated rendering
+// paths in prv_info_update_proc so they can't drift apart. `y_offset` is the
+// height already consumed above by prv_draw_panel_header (0 for an untitled
+// panel).
 static void prv_draw_rows(GContext *ctx, GFont prefix_font, GFont text_font, int width,
                            const InfoItem *items, int start, int end, int y_offset) {
-  int y = y_offset + 6;
+  int y = y_offset + ROWS_TOP_PADDING;
   for (int i = start; i < end; i++) {
     bool is_divider = items[i].type == ITEM_TYPE_DIVIDER;
     int row_h = prv_row_height(&items[i]);
