@@ -187,10 +187,17 @@ static bool s_bt_connected = true;
 // layout at this screen's full width -- measured on-device: GOTHIC_18 fits ~58 chars of
 // representative prose across two full-width (width - 8) lines on a 200px-wide screen, see
 // PROTOCOL.md's "Feed" section.
+// 11 usable chars + null terminator.
+#define INFO_ITEM_PREFIX_LEN 12
+// 60 usable chars + null terminator. Shared with the local scratch buffers below that copy or
+// transform an item's text (prv_weather_icon_for, prv_feed_line1_len, prv_draw_rows) so they
+// can't drift out of sync with the field they're sized after.
+#define INFO_ITEM_TEXT_LEN 61
+
 typedef struct {
   uint8_t type;
-  char prefix[12];
-  char text[61];
+  char prefix[INFO_ITEM_PREFIX_LEN];
+  char text[INFO_ITEM_TEXT_LEN];
 } InfoItem;
 
 #define MAX_INFO_ITEMS 8
@@ -712,7 +719,7 @@ typedef enum {
 // "sun"/"clear" and anything unrecognized, so a condition word this list
 // doesn't know yet still renders sensibly instead of drawing nothing.
 static WeatherIcon prv_weather_icon_for(const char *text) {
-  char lower[61]; // matches InfoItem.text's capacity, see the struct above
+  char lower[INFO_ITEM_TEXT_LEN];
   size_t len = strlen(text);
   if (len >= sizeof(lower)) {
     len = sizeof(lower) - 1;
@@ -805,7 +812,7 @@ static size_t prv_feed_line1_len(const char *text, GFont font, int narrow_w) {
                    "Ag", font, GRect(0, 0, 1000, 1000), GTextOverflowModeWordWrap, GTextAlignmentLeft)
                    .h;
 
-  char candidate[61]; // matches InfoItem.text's capacity, see the struct above
+  char candidate[INFO_ITEM_TEXT_LEN];
   size_t last_fit = 0;
   size_t i = 0;
   while (i <= len) {
@@ -866,7 +873,7 @@ static void prv_draw_rows(GContext *ctx, GFont prefix_font, GFont text_font, int
       int narrow_w = width - 80;
       size_t split = prv_feed_line1_len(items[i].text, text_font, narrow_w);
 
-      char line1[61]; // matches InfoItem.text's capacity
+      char line1[INFO_ITEM_TEXT_LEN];
       size_t line1_len = split < sizeof(line1) ? split : sizeof(line1) - 1;
       memcpy(line1, items[i].text, line1_len);
       line1[line1_len] = '\0';
