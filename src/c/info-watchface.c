@@ -951,6 +951,16 @@ static int prv_draw_panel_header(GContext *ctx, GRect bounds, const char *title)
   return PANEL_HEADER_H;
 }
 
+// Draws the "Nothing to see" placeholder row used when a panel (or the whole
+// info area, for `y_offset` 0) has no items. `y_offset` is the height already
+// consumed above by prv_draw_panel_header, same convention as prv_draw_rows.
+static void prv_draw_empty_message(GContext *ctx, GRect bounds, GFont text_font, int y_offset) {
+  GRect empty_rect = GRect(4, y_offset + ROWS_TOP_PADDING, bounds.size.w - 8, ROW_HEIGHT);
+  graphics_context_set_text_color(ctx, GColorLightGray);
+  graphics_draw_text(ctx, "Nothing to see", text_font, empty_rect,
+                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+}
+
 static void prv_info_update_proc(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
   GFont text_font = fonts_get_system_font(FONT_KEY_GOTHIC_18);
@@ -960,10 +970,7 @@ static void prv_info_update_proc(Layer *layer, GContext *ctx) {
     graphics_context_set_stroke_color(ctx, GColorLightGray);
     graphics_context_set_stroke_width(ctx, 1);
     graphics_draw_line(ctx, GPoint(0, 0), GPoint(bounds.size.w, 0));
-    GRect empty_rect = GRect(4, 6, bounds.size.w - 8, ROW_HEIGHT);
-    graphics_context_set_text_color(ctx, GColorLightGray);
-    graphics_draw_text(ctx, "Nothing to see", text_font, empty_rect,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    prv_draw_empty_message(ctx, bounds, text_font, 0);
     return;
   }
 
@@ -978,10 +985,7 @@ static void prv_info_update_proc(Layer *layer, GContext *ctx) {
   GFont prefix_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
 
   if (panel->item_count == 0) {
-    GRect empty_rect = GRect(4, header_h + 6, bounds.size.w - 8, ROW_HEIGHT);
-    graphics_context_set_text_color(ctx, GColorLightGray);
-    graphics_draw_text(ctx, "Nothing to see", text_font, empty_rect,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    prv_draw_empty_message(ctx, bounds, text_font, header_h);
     return;
   }
 
